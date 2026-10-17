@@ -59,6 +59,7 @@ import { NetworkLabController } from './network-lab-controller.js';
 import { createNetworkRecorderForDesktop } from './network-recorder-factory.js';
 import { PersistentNetworkArchive } from './persistent-network-archive.js';
 import { isSourceModuleId, sourceModulePath } from './source-modules.js';
+import { CourseBrushController } from './course-brush-controller.js';
 
 let assignmentAssets: AssignmentAssets | undefined;
 let assignmentAnswerPending = false;
@@ -67,6 +68,7 @@ let mainWindow: BrowserWindow | undefined;
 let browserController: BrowserController | undefined;
 let networkLabController: NetworkLabController | undefined;
 let webProbeController: WebProbeController | undefined;
+let courseBrushController: CourseBrushController | undefined;
 let cliServer: DesktopCliServer | undefined;
 let serviceCleanupPromise: Promise<void> | undefined;
 let quitAfterCleanup = false;
@@ -96,6 +98,10 @@ if (!hasSingleInstanceLock) {
 }
 
 function configureStorageProfile(): void {
+  if (app.getName() === 'Electron') {
+    app.setName('@ykt/desktop');
+    app.setPath('userData', join(app.getPath('appData'), '@ykt', 'desktop'));
+  }
   const portableMarker = join(dirname(app.getPath('exe')), 'portable.flag');
   if (process.argv.includes('--portable') || existsSync(portableMarker)) {
     app.setPath(
@@ -638,6 +644,62 @@ function registerIpc(): void {
     const error = await shell.openPath(sourceModulePath(id));
     if (error) throw new Error(error);
   });
+  ipcMain.handle(IpcChannel.GetCourseBrushState, (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().getState();
+  });
+  ipcMain.handle(
+    IpcChannel.UpdateCourseBrushConfig,
+    (event, patch: unknown) => {
+      assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+      if (!isRecord(patch)) throw new Error('Invalid course brush config.');
+      return getCourseBrushController().updateConfig(patch);
+    },
+  );
+  ipcMain.handle(IpcChannel.StartCourseBrush, async (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().start();
+  });
+  ipcMain.handle(IpcChannel.PauseCourseBrush, (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().pause();
+  });
+  ipcMain.handle(IpcChannel.StopCourseBrush, (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().stop();
+  });
+  ipcMain.handle(IpcChannel.ClearCourseBrushLogs, (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().clearLogs();
+  });
+  ipcMain.handle(
+    IpcChannel.ProbeCourseBrushPage,
+    async (event, captureScreenshot: unknown = true) => {
+      assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+      return getCourseBrushController().probeCurrentPage(
+        captureScreenshot !== false,
+      );
+    },
+  );
+  ipcMain.handle(
+    IpcChannel.SolveCurrentBrushQuestion,
+    async (event, submit: unknown = true) => {
+      assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+      return getCourseBrushController().solveCurrentQuestion(submit !== false);
+    },
+  );
+  ipcMain.handle(IpcChannel.SolveAllBrushQuestionsOnPage, async (event) => {
+    assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+    return getCourseBrushController().solveAllQuestionsOnCurrentPage();
+  });
+  ipcMain.handle(
+    IpcChannel.OpenCourseBrushSandbox,
+    async (event, mode: unknown = 'homework') => {
+      assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+      const validMode = mode === 'directory' ? 'directory' : 'homework';
+      return getCourseBrushController().openSandbox(validMode);
+    },
+  );
 }
 
 function assertTrustedIpc(sender: WebContents, senderUrl: string): void {
@@ -822,6 +884,11 @@ function getWebProbeController(): WebProbeController {
   return webProbeController;
 }
 
+function getCourseBrushController(): CourseBrushController {
+  if (!courseBrushController) throw new Error('Course brush is not ready.');
+  return courseBrushController;
+}
+
 function getNetworkLabController(): NetworkLabController {
   if (!networkLabController) throw new Error('Network lab is not ready.');
   return networkLabController;
@@ -920,11 +987,28 @@ async function createWindow(): Promise<void> {
     analyzeInWorker,
   );
   webProbeController = nextWebProbeController;
+  const nextCourseBrushController = new CourseBrushController(
+    nextBrowserController,
+    () => getRuntime().facade,
+    (brushState) => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        window.webContents.send(
+          IpcChannel.CourseBrushStateChanged,
+          brushState,
+        );
+      }
+    },
+  );
+  courseBrushController = nextCourseBrushController;
   const windowResources: { cliServer?: DesktopCliServer } = {};
   let disposed = false;
   window.on('close', () => {
     if (disposed) return;
     disposed = true;
+    nextCourseBrushController.destroy();
+    if (courseBrushController === nextCourseBrushController) {
+      courseBrushController = undefined;
+    }
     nextWebProbeController.cancel();
     if (webProbeController === nextWebProbeController)
       webProbeController = undefined;
@@ -942,6 +1026,9 @@ async function createWindow(): Promise<void> {
     }
     if (networkLabController === nextNetworkLabController) {
       networkLabController = undefined;
+    }
+    if (courseBrushController === nextCourseBrushController) {
+      courseBrushController = undefined;
     }
     if (cliServer === windowResources.cliServer) cliServer = undefined;
     runtime = undefined;

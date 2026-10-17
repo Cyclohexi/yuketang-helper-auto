@@ -14,6 +14,10 @@ import {
   type ClassroomSimulationAction,
   type ClassroomSimulationState,
   type ConnectAiProfileInput,
+  type CourseBrushAiResult,
+  type CourseBrushConfig,
+  type CourseBrushPageProbe,
+  type CourseBrushState,
   type DesktopApi,
   type FixtureExportResult,
   type GenerateAnswerProposalInput,
@@ -315,6 +319,59 @@ const api: DesktopApi = Object.freeze({
         IpcChannel.NetworkCaptureStateChanged,
         handler,
       );
+  },
+  getCourseBrushState: () =>
+    ipcRenderer.invoke(
+      IpcChannel.GetCourseBrushState,
+    ) as Promise<CourseBrushState>,
+  updateCourseBrushConfig: (patch: Partial<CourseBrushConfig>) =>
+    ipcRenderer.invoke(
+      IpcChannel.UpdateCourseBrushConfig,
+      patch,
+    ) as Promise<CourseBrushState>,
+  startCourseBrush: () =>
+    ipcRenderer.invoke(
+      IpcChannel.StartCourseBrush,
+    ) as Promise<CourseBrushState>,
+  pauseCourseBrush: () =>
+    ipcRenderer.invoke(
+      IpcChannel.PauseCourseBrush,
+    ) as Promise<CourseBrushState>,
+  stopCourseBrush: () =>
+    ipcRenderer.invoke(IpcChannel.StopCourseBrush) as Promise<CourseBrushState>,
+  clearCourseBrushLogs: () =>
+    ipcRenderer.invoke(
+      IpcChannel.ClearCourseBrushLogs,
+    ) as Promise<CourseBrushState>,
+  probeCourseBrushPage: (captureScreenshot = true) =>
+    ipcRenderer.invoke(
+      IpcChannel.ProbeCourseBrushPage,
+      captureScreenshot,
+    ) as Promise<CourseBrushPageProbe>,
+  solveCurrentBrushQuestion: (submit = true) =>
+    ipcRenderer.invoke(
+      IpcChannel.SolveCurrentBrushQuestion,
+      submit,
+    ) as Promise<CourseBrushAiResult>,
+  solveAllBrushQuestionsOnPage: () =>
+    ipcRenderer.invoke(
+      IpcChannel.SolveAllBrushQuestionsOnPage,
+    ) as Promise<CourseBrushState>,
+  openCourseBrushSandbox: (mode: 'directory' | 'homework' = 'homework') =>
+    ipcRenderer.invoke(
+      IpcChannel.OpenCourseBrushSandbox,
+      mode,
+    ) as Promise<CourseBrushState>,
+  onCourseBrushStateChanged: (listener: (state: CourseBrushState) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      state: CourseBrushState,
+    ) => {
+      listener(state);
+    };
+    ipcRenderer.on(IpcChannel.CourseBrushStateChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(IpcChannel.CourseBrushStateChanged, handler);
   },
 });
 

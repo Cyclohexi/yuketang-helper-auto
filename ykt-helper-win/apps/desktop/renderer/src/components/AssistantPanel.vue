@@ -28,6 +28,7 @@ import {
 } from '@ykt/contracts';
 
 import AssignmentsPanel from './AssignmentsPanel.vue';
+import CourseBrushPanel from './CourseBrushPanel.vue';
 import type { AssignmentAiDraft } from '../assignment-ai';
 import ClassroomSimulator from './ClassroomSimulator.vue';
 import ProblemPicker from './ProblemPicker.vue';
@@ -36,6 +37,7 @@ import { renderSimpleMarkdown } from '../simple-markdown';
 
 type WorkspacePage =
   | 'assignments'
+  | 'coursebrush'
   | 'classroom'
   | 'problems'
   | 'ai'
@@ -1925,6 +1927,10 @@ function clamp(value: number, min: number, max: number): number {
             :environment="environment"
             @explain="explainAssignment"
           />
+        </section>
+
+        <section v-else-if="page === 'coursebrush'" class="panel-page">
+          <CourseBrushPanel />
         </section>
 
         <section v-else-if="page === 'problems'" class="panel-page">

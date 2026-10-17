@@ -1,5 +1,11 @@
 import type { AssignmentDetail, AssignmentAsset } from './assignment-detail.js';
 import type {
+  CourseBrushAiResult,
+  CourseBrushConfig,
+  CourseBrushPageProbe,
+  CourseBrushState,
+} from './course-brush.js';
+import type {
   WebProbeReport,
   WebProbeEvidence,
   WebProbeRequest,
@@ -103,6 +109,17 @@ export const IpcChannel = {
   OpenSourceModule: 'desktop:open-source-module',
   NetworkEntryAdded: 'network:entry-added',
   NetworkCaptureStateChanged: 'network:capture-state-changed',
+  GetCourseBrushState: 'course-brush:get-state',
+  UpdateCourseBrushConfig: 'course-brush:update-config',
+  StartCourseBrush: 'course-brush:start',
+  PauseCourseBrush: 'course-brush:pause',
+  StopCourseBrush: 'course-brush:stop',
+  ClearCourseBrushLogs: 'course-brush:clear-logs',
+  ProbeCourseBrushPage: 'course-brush:probe-page',
+  SolveCurrentBrushQuestion: 'course-brush:solve-current-question',
+  SolveAllBrushQuestionsOnPage: 'course-brush:solve-all-questions',
+  OpenCourseBrushSandbox: 'course-brush:open-sandbox',
+  CourseBrushStateChanged: 'course-brush:state-changed',
 } as const;
 
 export interface DesktopApi {
@@ -196,6 +213,23 @@ export interface DesktopApi {
   onNetworkEntryAdded(listener: (entry: NetworkEntry) => void): () => void;
   onNetworkCaptureStateChanged(
     listener: (state: NetworkCaptureState) => void,
+  ): () => void;
+  getCourseBrushState(): Promise<CourseBrushState>;
+  updateCourseBrushConfig(
+    patch: Partial<CourseBrushConfig>,
+  ): Promise<CourseBrushState>;
+  startCourseBrush(): Promise<CourseBrushState>;
+  pauseCourseBrush(): Promise<CourseBrushState>;
+  stopCourseBrush(): Promise<CourseBrushState>;
+  clearCourseBrushLogs(): Promise<CourseBrushState>;
+  probeCourseBrushPage(captureScreenshot?: boolean): Promise<CourseBrushPageProbe>;
+  solveCurrentBrushQuestion(submit?: boolean): Promise<CourseBrushAiResult>;
+  solveAllBrushQuestionsOnPage(): Promise<CourseBrushState>;
+  openCourseBrushSandbox(
+    mode?: 'directory' | 'homework',
+  ): Promise<CourseBrushState>;
+  onCourseBrushStateChanged(
+    listener: (state: CourseBrushState) => void,
   ): () => void;
 }
 

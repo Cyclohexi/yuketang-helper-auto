@@ -12,3 +12,4 @@ export * from './settings-patch.js';
 export * from './assignments.js';
 export * from './web-probe.js';
 export * from './assignment-detail.js';
+export * from './course-brush.js';

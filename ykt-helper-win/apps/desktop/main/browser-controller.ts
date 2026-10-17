@@ -406,6 +406,10 @@ export class BrowserController {
     const contents = tab.view.webContents;
 
     contents.on('will-navigate', (event) => {
+      if (event.url.includes('/v2/web/violations')) {
+        event.preventDefault();
+        return;
+      }
       if (!isAllowedYuketangUrl(event.url)) {
         event.preventDefault();
         tab.errorMessage = '已阻止跳转到雨课堂域名之外的页面';
@@ -414,6 +418,10 @@ export class BrowserController {
     });
 
     contents.on('will-redirect', (event) => {
+      if (event.url.includes('/v2/web/violations')) {
+        event.preventDefault();
+        return;
+      }
       if (!isAllowedYuketangUrl(event.url)) {
         event.preventDefault();
         tab.errorMessage = '已阻止不受信任的重定向';
