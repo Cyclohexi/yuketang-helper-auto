@@ -44,6 +44,7 @@ export class CourseBrushController {
   #unitReloadAttempts = new Map<string, number>();
   #needFirstIncompleteAlignment = true;
   #lastAlignedClassroomId = '';
+  #alignmentAttempts = 0;
   #removeContentsListener: (() => void) | null = null;
 
   constructor(
@@ -150,6 +151,7 @@ export class CourseBrushController {
     this.#status = 'running';
     this.#needFirstIncompleteAlignment = true;
     this.#lastAlignedClassroomId = '';
+    this.#alignmentAttempts = 0;
     this.#processedDirectoryKeys.clear();
     this.#unitReloadAttempts.clear();
     this.#speedAttemptsByUrl.clear();
@@ -514,23 +516,22 @@ export class CourseBrushController {
         if (this.#needFirstIncompleteAlignment) {
           const alignResult = await this.alignToFirstIncompleteUnit();
           if (alignResult.waitingForSidebar) {
-            this.#currentTaskTitle = '正在检测并读取课程目录进度…';
-            this.emitState();
-            await this.sleep(1500);
-            return;
-          }
-          if (alignResult.allCompleted) {
+            this.#alignmentAttempts += 1;
+            if (this.#alignmentAttempts <= 2) {
+              this.#currentTaskTitle = '正在检测并读取课程目录进度…';
+              this.emitState();
+              await this.sleep(1200);
+              return;
+            }
             this.#needFirstIncompleteAlignment = false;
-            this.#currentTaskTitle = '🎉 当前课程全部任务已完成！';
+            this.#alignmentAttempts = 0;
             this.log(
-              'success',
-              '🎉 自动检测确认：当前课程所有已启用类型的任务均已完成！',
+              'info',
+              'ℹ️ 侧边栏目录加载超时，直接从当前学习单元开刷',
             );
-            this.stop();
-            return;
-          }
-          if (alignResult.switched) {
+          } else if (alignResult.switched) {
             this.#needFirstIncompleteAlignment = false;
+            this.#alignmentAttempts = 0;
             this.#mediaWaitTicks = 0;
             this.log(
               'info',
@@ -540,13 +541,32 @@ export class CourseBrushController {
             this.emitState();
             await this.sleep(2800);
             return;
-          }
-          if (alignResult.alreadyAtTarget) {
+          } else if (alignResult.alreadyAtTarget) {
             this.#needFirstIncompleteAlignment = false;
+            this.#alignmentAttempts = 0;
             this.log(
               'info',
               `🎯 自动检测确认：当前正是全课首个未完成任务（第 ${(alignResult.targetIdx ?? 0) + 1}/${alignResult.total ?? '?'} 节）：${alignResult.title ?? ''}，直接开始刷课`,
             );
+          } else if (alignResult.allCompleted) {
+            this.#needFirstIncompleteAlignment = false;
+            this.#alignmentAttempts = 0;
+            if (
+              !probe.mediaStatus.hasVideo &&
+              !probe.mediaStatus.hasAudio &&
+              !probe.questionProbe.found
+            ) {
+              this.#currentTaskTitle = '🎉 当前课程全部任务已完成！';
+              this.log(
+                'success',
+                '🎉 自动检测确认：当前课程所有已启用类型的任务均已完成！',
+              );
+              this.stop();
+              return;
+            }
+          } else {
+            this.#needFirstIncompleteAlignment = false;
+            this.#alignmentAttempts = 0;
           }
         }
       }
@@ -683,6 +703,7 @@ export class CourseBrushController {
   private async alignToFirstIncompleteUnit(): Promise<{
     ready: boolean;
     waitingForSidebar?: boolean;
+    noSidebar?: boolean;
     allCompleted?: boolean;
     alreadyAtTarget?: boolean;
     switched?: boolean;
@@ -693,7 +714,7 @@ export class CourseBrushController {
   }> {
     const contents = this.browser.webContents;
     if (!contents || contents.isDestroyed()) {
-      return { ready: false, waitingForSidebar: true };
+      return { ready: false, noSidebar: true };
     }
     try {
       const res = (await contents.executeJavaScript(
@@ -702,6 +723,7 @@ export class CourseBrushController {
       )) as {
         ready: boolean;
         waitingForSidebar?: boolean;
+        noSidebar?: boolean;
         allCompleted?: boolean;
         alreadyAtTarget?: boolean;
         switched?: boolean;
@@ -712,7 +734,7 @@ export class CourseBrushController {
       };
       return res;
     } catch {
-      return { ready: false, waitingForSidebar: true };
+      return { ready: false, noSidebar: true };
     }
   }
 
@@ -3519,7 +3541,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       }
     }
 
-    return { ready: false, waitingForSidebar: true };
+    return { ready: false, noSidebar: true };
   })()`;
 }
 
