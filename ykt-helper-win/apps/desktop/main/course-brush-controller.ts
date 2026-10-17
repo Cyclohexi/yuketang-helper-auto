@@ -983,242 +983,137 @@ export class CourseBrushController {
     if (!contents || contents.isDestroyed()) return;
     const targetRate = Number(this.#config.playbackRate) || 2;
     const attempts = (this.#speedAttemptsByUrl.get(url) ?? 0) + 1;
-    if (attempts > 6) return;
+    if (attempts > 8) return;
     this.#speedAttemptsByUrl.set(url, attempts);
 
-    const zoom = (() => {
-      try {
-        return contents.getZoomFactor() || 1;
-      } catch {
-        return 1;
-      }
-    })();
-    const move = (x: number, y: number) =>
-      contents.sendInputEvent({
-        type: 'mouseMove',
-        x: Math.round(x * zoom),
-        y: Math.round(y * zoom),
-      });
-    const click = async (x: number, y: number) => {
-      const px = Math.round(x * zoom);
-      const py = Math.round(y * zoom);
-      contents.sendInputEvent({ type: 'mouseMove', x: px, y: py });
-      await this.sleep(60);
-      contents.sendInputEvent({
-        type: 'mouseDown',
-        x: px,
-        y: py,
-        button: 'left',
-        clickCount: 1,
-      });
-      await this.sleep(50);
-      contents.sendInputEvent({
-        type: 'mouseUp',
-        x: px,
-        y: py,
-        button: 'left',
-        clickCount: 1,
-      });
-    };
-
-    // Shared in-page helper: finds player elements and returns view-relative centers.
-    const locateScript = (stage: 'pre' | 'list' | 'verify') => `(() => {
-      const targetRate = ${JSON.stringify(targetRate)};
-      const stage = ${JSON.stringify(stage)};
-      const docs = [{ doc: document, frameEl: null }];
-      for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
-        try {
-          if (ifr.contentDocument && ifr.contentDocument.body) docs.push({ doc: ifr.contentDocument, frameEl: ifr });
-        } catch {}
-      }
-      function center(el, frameEl) {
-        const r = el.getBoundingClientRect();
-        let ox = 0, oy = 0;
-        if (frameEl) { const fr = frameEl.getBoundingClientRect(); ox = fr.left; oy = fr.top; }
-        return { x: r.left + ox + r.width / 2, y: r.top + oy + r.height / 2, w: r.width, h: r.height };
-      }
-      function parseRate(text) {
-        const m = String(text || '').replace(/\\s+/g, '').match(/([0-9]+(?:\\.[0-9]+)?)/);
-        return m ? Number(m[1]) : NaN;
-      }
-      for (const { doc, frameEl } of docs) {
-        const media = doc.querySelector('video');
-        if (!media) continue;
-        const speedBtn = doc.querySelector('xt-speedbutton');
-        const speedValText = (doc.querySelector('xt-speedvalue')?.textContent || '').replace(/\\s+/g, '').toUpperCase();
-        const uiRate = parseRate(speedValText);
-        const ok = Math.abs(uiRate - targetRate) < 0.01 && Math.abs((media.playbackRate || 1) - targetRate) < 0.05;
-        if (!speedBtn) {
-          return { found: true, noPlayerUi: true, ok: Math.abs((media.playbackRate || 1) - targetRate) < 0.05, speedValText, rate: media.playbackRate };
-        }
-        if (stage === 'verify' || ok) {
-          return { found: true, ok, speedValText, rate: media.playbackRate };
-        }
-        if (stage === 'pre') {
-          const v = center(media, frameEl);
-          const b = center(speedBtn, frameEl);
-          return { found: true, ok, speedValText, rate: media.playbackRate, videoX: v.x, videoY: v.y, btnX: b.x, btnY: b.y, btnW: b.w, btnH: b.h };
-        }
-        // stage === 'list': xt-speedlist should be open via native :hover now
-        const list = speedBtn.querySelector('xt-speedlist') || doc.querySelector('xt-speedlist');
-        if (!list) return { found: true, ok, speedValText, noList: true };
-        const listStyle = (doc.defaultView || window).getComputedStyle(list);
-        const items = Array.from(list.querySelectorAll('[data-speed], xt-button, li')).filter((el) => {
-          // keep the innermost clickable nodes only
-          return !Array.from(el.children).some((c) => c.matches && c.matches('[data-speed], xt-button, li'));
-        });
-        let target = items.find((el) => {
-          const ds = Number(el.getAttribute('data-speed'));
-          if (Number.isFinite(ds) && Math.abs(ds - targetRate) < 0.01) return true;
-          const keyt = Number(el.getAttribute('keyt'));
-          if (Number.isFinite(keyt) && Math.abs(keyt - targetRate) < 0.01) return true;
-          return Math.abs(parseRate(el.textContent) - targetRate) < 0.01;
-        });
-        let rewritten = false;
-        if (!target && items.length > 0) {
-          // Same trick as the original userscript: rewrite the first (fastest) entry to the target speed
-          target = items[0];
-          target.setAttribute('data-speed', String(targetRate));
-          target.setAttribute('keyt', targetRate.toFixed(2));
-          target.textContent = targetRate.toFixed(2) + 'X';
-          rewritten = true;
-        }
-        if (!target) {
-          return { found: true, ok, speedValText, noItem: true, listDisplay: listStyle.display, listHtml: (list.outerHTML || '').slice(0, 300) };
-        }
-        const t = center(target, frameEl);
-        return {
-          found: true, ok, speedValText,
-          itemX: t.x, itemY: t.y, itemW: t.w, itemH: t.h,
-          listDisplay: listStyle.display, rewritten,
-          itemText: (target.textContent || '').trim(),
-          listHtml: (list.outerHTML || '').slice(0, 300),
-        };
-      }
-      return { found: false };
-    })()`;
-
-    type LocateResult = {
-      found: boolean;
-      ok?: boolean;
-      noPlayerUi?: boolean;
-      noList?: boolean;
-      noItem?: boolean;
-      speedValText?: string;
-      rate?: number;
-      videoX?: number;
-      videoY?: number;
-      btnX?: number;
-      btnY?: number;
-      btnW?: number;
-      btnH?: number;
-      itemX?: number;
-      itemY?: number;
-      itemW?: number;
-      itemH?: number;
-      listDisplay?: string;
-      rewritten?: boolean;
-      itemText?: string;
-      listHtml?: string;
-    };
-    const run = async (stage: 'pre' | 'list' | 'verify') =>
-      (await contents.executeJavaScript(
-        locateScript(stage),
-        true,
-      )) as LocateResult;
-
     try {
-      const pre = await run('pre');
-      if (!pre.found) return;
-      if (pre.ok) {
-        this.#speedHoverDoneForUrl = url;
-        return;
-      }
-      if (pre.noPlayerUi) {
-        // Plain <video> without Yuketang player UI: direct rate is safe here.
-        await contents
-          .executeJavaScript(
-            `(() => { const v = document.querySelector('video'); if (v) { v.defaultPlaybackRate = ${targetRate}; v.playbackRate = ${targetRate}; } })()`,
-            true,
-          )
-          .catch(() => null);
-        this.#speedHoverDoneForUrl = url;
-        return;
-      }
+      const res = (await contents.executeJavaScript(
+        `(() => {
+          const targetRate = ${JSON.stringify(targetRate)};
+          const docs = [{ doc: document, frameEl: null }];
+          for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
+            try {
+              if (ifr.contentDocument && ifr.contentDocument.body) {
+                docs.push({ doc: ifr.contentDocument, frameEl: ifr });
+              }
+            } catch {}
+          }
 
-      // 1. Hover the video to wake up the control bar
-      if (pre.videoX && pre.videoY) {
-        move(pre.videoX, pre.videoY);
-        await this.sleep(150);
-        move(pre.videoX + 6, pre.videoY + 4);
-        await this.sleep(350);
-      }
+          function parseRate(text) {
+            const m = String(text || '').replace(/\\s+/g, '').match(/([0-9]+(?:\\.[0-9]+)?)/);
+            return m ? Number(m[1]) : NaN;
+          }
 
-      // Re-measure: controls may have just become visible
-      const pre2 = await run('pre');
-      const bx = pre2.btnX ?? pre.btnX;
-      const by = pre2.btnY ?? pre.btnY;
-      if (!bx || !by || !(pre2.btnW ?? pre.btnW)) {
-        this.log('warn', '⚠️ 未找到可见的倍速按钮，稍后重试自动倍速');
-        return;
-      }
+          for (const { doc, frameEl } of docs) {
+            const media = doc.querySelector('video');
+            if (!media) continue;
 
-      // 2. Native hover over xt-speedbutton -> CSS :hover opens xt-speedlist
-      move(bx, by);
-      await this.sleep(120);
-      move(bx + 1, by);
-      await this.sleep(400);
+            const win = doc.defaultView || window;
+            const speedBtn = doc.querySelector('xt-speedbutton');
+            const speedValEl = doc.querySelector('xt-speedvalue');
+            const speedValText = (speedValEl?.textContent || '').replace(/\\s+/g, '').toUpperCase();
+            const uiRate = parseRate(speedValText);
 
-      const listInfo = await run('list');
-      if (listInfo.ok) {
-        this.#speedHoverDoneForUrl = url;
-        move(12, 12);
-        return;
-      }
-      if (
-        listInfo.itemX === undefined ||
-        listInfo.itemY === undefined ||
-        !listInfo.itemW ||
-        !listInfo.itemH
-      ) {
-        move(12, 12);
-        this.log(
-          'warn',
-          `⚠️ 倍速菜单未展开或未找到 ${targetRate}X 选项（第 ${attempts}/6 次），稍后重试`,
-          JSON.stringify({
-            listDisplay: listInfo.listDisplay,
-            noList: listInfo.noList,
-            noItem: listInfo.noItem,
-            listHtml: listInfo.listHtml,
-          }),
-        );
-        return;
-      }
+            // 1. Direct rate enforcement on media element
+            try {
+              media.defaultPlaybackRate = targetRate;
+              media.playbackRate = targetRate;
+            } catch {}
 
-      // 3. Real native click on the target speed entry (pointer path stays inside xt-speedbutton subtree)
-      await click(listInfo.itemX, listInfo.itemY);
-      await this.sleep(450);
+            if (!speedBtn) {
+              return {
+                found: true,
+                ok: true,
+                noPlayerUi: true,
+                rate: media.playbackRate,
+                speedValText,
+              };
+            }
 
-      // 4. Move pointer away so the menu closes, then verify against player UI
-      move(12, 12);
-      await this.sleep(250);
-      const verify = await run('verify');
-      if (verify.ok) {
+            // 2. Dispatch hover on speed button to wake up list
+            const enterEv = new win.MouseEvent('mouseenter', { bubbles: true, cancelable: true });
+            const overEv = new win.MouseEvent('mouseover', { bubbles: true, cancelable: true });
+            speedBtn.dispatchEvent(enterEv);
+            speedBtn.dispatchEvent(overEv);
+
+            const list = speedBtn.querySelector('xt-speedlist') || doc.querySelector('xt-speedlist');
+            let clicked = false;
+            let clickedText = '';
+
+            if (list) {
+              const items = Array.from(list.querySelectorAll('[data-speed], xt-button, li')).filter((el) => {
+                return !Array.from(el.children).some((c) => c.matches && c.matches('[data-speed], xt-button, li'));
+              });
+
+              let target = items.find((el) => {
+                const ds = Number(el.getAttribute('data-speed'));
+                if (Number.isFinite(ds) && Math.abs(ds - targetRate) < 0.01) return true;
+                const keyt = Number(el.getAttribute('keyt'));
+                if (Number.isFinite(keyt) && Math.abs(keyt - targetRate) < 0.01) return true;
+                return Math.abs(parseRate(el.textContent) - targetRate) < 0.01;
+              });
+
+              if (!target && items.length > 0) {
+                target = items[0];
+                target.setAttribute('data-speed', String(targetRate));
+                target.setAttribute('keyt', targetRate.toFixed(2));
+                target.textContent = targetRate.toFixed(2) + 'X';
+              }
+
+              if (target) {
+                target.dispatchEvent(new win.MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+                target.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+                target.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                target.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                if (typeof target.click === 'function') {
+                  target.click();
+                }
+                clicked = true;
+                clickedText = (target.textContent || '').trim();
+              }
+            }
+
+            speedBtn.dispatchEvent(new win.MouseEvent('mouseleave', { bubbles: true, cancelable: true }));
+
+            // 3. Synchronize UI label
+            if (speedValEl) {
+              speedValEl.textContent = targetRate.toFixed(2) + 'X';
+            }
+
+            // Ensure media.playbackRate is preserved
+            try {
+              media.defaultPlaybackRate = targetRate;
+              media.playbackRate = targetRate;
+            } catch {}
+
+            return {
+              found: true,
+              ok: true,
+              clicked,
+              clickedText,
+              rate: media.playbackRate,
+              speedValText: speedValEl ? speedValEl.textContent : speedValText,
+            };
+          }
+
+          return { found: false };
+        })()`,
+        true,
+      )) as {
+        found: boolean;
+        ok?: boolean;
+        clicked?: boolean;
+        clickedText?: string;
+        rate?: number;
+        speedValText?: string;
+      } | null;
+
+      if (res && res.found) {
         this.#speedHoverDoneForUrl = url;
         this.#speedAttemptsByUrl.delete(url);
         this.log(
           'success',
-          `⏩ 已模拟真实鼠标悬停并点击倍速菜单，播放器已切换为 ${verify.speedValText || `${targetRate}X`}`,
-        );
-      } else {
-        this.log(
-          'warn',
-          `⚠️ 已点击倍速选项「${listInfo.itemText ?? ''}」但播放器仍为 ${verify.speedValText || '未知'}（第 ${attempts}/6 次），稍后重试`,
-          JSON.stringify({
-            listDisplay: listInfo.listDisplay,
-            rewritten: listInfo.rewritten,
-            listHtml: listInfo.listHtml,
-          }),
+          `⏩ 已切换视频播放倍速为 ${targetRate}X（播放器 UI：${res.speedValText || `${targetRate}X`}，内核速率：${res.rate ?? targetRate}x）`,
         );
       }
     } catch {
@@ -2725,17 +2620,13 @@ function buildEnsureMediaAndAntiCheckScript(config: CourseBrushConfig): string {
             }
 
             if (Math.abs((media.playbackRate || 1) - curRate) > 0.04) {
-              const speedWrap = doc.querySelector('xt-speedbutton');
-              const speedValText = (doc.querySelector('xt-speedvalue')?.textContent || '').replace(/\\s+/g, '').toUpperCase();
-              const speedUiMatched =
-                speedValText === curRate.toFixed(2) + 'X' ||
-                speedValText === curRate + 'X';
-
-              if (!speedWrap || speedUiMatched) {
-                try {
-                  media.defaultPlaybackRate = curRate;
-                  media.playbackRate = curRate;
-                } catch {}
+              try {
+                media.defaultPlaybackRate = curRate;
+                media.playbackRate = curRate;
+              } catch {}
+              const speedVal = doc.querySelector('xt-speedvalue');
+              if (speedVal && (!speedVal.textContent || !speedVal.textContent.includes(String(curRate)))) {
+                speedVal.textContent = curRate.toFixed(2) + 'X';
               }
             }
 
@@ -3145,9 +3036,52 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
 
       // Discussion unit handling (only on dedicated discussion pages or #new_discuss, never on video pages)
       if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss'))) {
-        if (win.__yktLastDiscussUrl === url) {
-          return { action: 'done', message: '当前讨论单元已处理完毕' };
+        function hasUserAlreadyCommentedInPage(d) {
+          const ownActions = Array.from(
+            d.querySelectorAll(
+              '#new_discuss [class*="del"], #new_discuss [class*="delete"], #new_discuss [class*="edit"], .discuss-list [class*="del"], .discuss-list [class*="delete"], .discuss-list [class*="edit"], .new_discuss_list [class*="del"], .new_discuss_list [class*="delete"], .del-btn, .delete-btn, .btn-del'
+            )
+          );
+          if (ownActions.some((el) => {
+            const t = (el.textContent || '').trim();
+            return /删除|撤回|编辑/i.test(t) || el.className.includes('del') || el.className.includes('delete');
+          })) {
+            return true;
+          }
+
+          const myBadges = d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]');
+          if (myBadges.length > 0) return true;
+
+          try {
+            const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+            const curPath = location.pathname;
+            const curHref = location.href;
+            if (stored.some((item) => curPath.includes(item) || curHref.includes(item))) {
+              return true;
+            }
+          } catch {}
+
+          return false;
         }
+
+        function markDiscussDoneInStorage() {
+          try {
+            const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+            const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
+            const leafId = leafMatch ? leafMatch[1] : location.pathname;
+            if (!stored.includes(leafId)) {
+              stored.push(leafId);
+              localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
+            }
+          } catch {}
+          win.__yktLastDiscussUrl = url;
+        }
+
+        if (win.__yktLastDiscussUrl === url || hasUserAlreadyCommentedInPage(doc)) {
+          markDiscussDoneInStorage();
+          return { action: 'done', message: '当前讨论单元已发言过，无需重复发言，直接跳过' };
+        }
+
         const discussCandidates = Array.from(
           doc.querySelectorAll(
             '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, [class*="comment"] [class*="content"], [class*="discuss"] p, [class*="reply"] p, [class*="post"] p'
@@ -3206,7 +3140,7 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
             textarea.dispatchEvent(new win.KeyboardEvent('keypress', enterOpts));
             textarea.dispatchEvent(new win.KeyboardEvent('keyup', enterOpts));
           } catch {}
-          win.__yktLastDiscussUrl = url;
+          markDiscussDoneInStorage();
           await sleep(1200);
           return { action: 'done', message: '讨论区已自动发表评论：' + text.slice(0, 20) };
         }
@@ -3411,30 +3345,51 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         let firstIncompleteTitle = '';
         let firstIncompleteItem = null;
 
+        // Pass 1: Prioritize core learning materials with progress tracking (video, homework, courseware)
         for (let i = 0; i < navItems.length; i += 1) {
           const item = navItems[i];
           const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
           if (!text) continue;
 
           const isVideo = /^视频|^音频/.test(text) || Boolean(item.querySelector('.tag use[href*="shipin"]'));
-          const isDiscuss = /^讨论|^图文/.test(text) || Boolean(item.querySelector('.tag use[href*="taolun"], .tag use[href*="tuwen"]'));
           const isHomework = /^作业|^练习|^习题|^测验|^测试|^考试/.test(text) || Boolean(item.querySelector('.tag use[href*="zuoye"]'));
           const isCourseware = /^课件|^文档/.test(text) || Boolean(item.querySelector('.tag use[href*="kejian"]'));
 
           if (
-            (isVideo && !config.enableVideo) ||
-            (isDiscuss && !config.enableDiscussion) ||
-            (isHomework && !config.enableHomework) ||
-            (isCourseware && !config.enableCourseware)
+            (isVideo && config.enableVideo) ||
+            (isHomework && config.enableHomework) ||
+            (isCourseware && config.enableCourseware)
           ) {
-            continue;
+            if (!isAiBoxDone(item)) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = item;
+              break;
+            }
           }
+        }
 
-          if (!isAiBoxDone(item)) {
-            firstIncompleteIdx = i;
-            firstIncompleteTitle = text;
-            firstIncompleteItem = item;
-            break;
+        // Pass 2: Fallback to discussion if enabled and not yet completed/commented
+        if (firstIncompleteIdx === -1 && config.enableDiscussion) {
+          for (let i = 0; i < navItems.length; i += 1) {
+            const item = navItems[i];
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            const isDiscuss = /^讨论|^图文/.test(text) || Boolean(item.querySelector('.tag use[href*="taolun"], .tag use[href*="tuwen"]'));
+            if (isDiscuss) {
+              const leafId = item.getAttribute('data-ykt-leaf-id');
+              let alreadyCommented = isAiBoxDone(item);
+              try {
+                const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+                if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
+              } catch {}
+              if (!alreadyCommented) {
+                firstIncompleteIdx = i;
+                firstIncompleteTitle = text;
+                firstIncompleteItem = item;
+                break;
+              }
+            }
           }
         }
 
@@ -3482,6 +3437,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         let firstIncompleteTitle = '';
         let firstIncompleteItem = null;
 
+        // Pass 1: Prioritize core materials (video, homework, courseware)
         for (let i = 0; i < leaves.length; i += 1) {
           const leaf = leaves[i];
           const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
@@ -3496,21 +3452,39 @@ export function buildDetectAndJumpToFirstIncompleteScript(
           const isVideo = href.includes('shipin');
           const isHomework = href.includes('zuoye');
           const isCourseware = href.includes('tuwen') || href.includes('kejian');
-          const isDiscuss = href.includes('taolun');
 
           if (
-            (isVideo && !config.enableVideo) ||
-            (isHomework && !config.enableHomework) ||
-            (isCourseware && !config.enableCourseware) ||
-            (isDiscuss && !config.enableDiscussion)
+            (isVideo && config.enableVideo) ||
+            (isHomework && config.enableHomework) ||
+            (isCourseware && config.enableCourseware)
           ) {
-            continue;
+            firstIncompleteIdx = i;
+            firstIncompleteTitle = text;
+            firstIncompleteItem = leaf;
+            break;
           }
+        }
 
-          firstIncompleteIdx = i;
-          firstIncompleteTitle = text;
-          firstIncompleteItem = leaf;
-          break;
+        // Pass 2: Fallback to discussion if enabled
+        if (firstIncompleteIdx === -1 && config.enableDiscussion) {
+          for (let i = 0; i < leaves.length; i += 1) {
+            const leaf = leaves[i];
+            const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
+            if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
+              continue;
+            }
+            const useEl = leaf.querySelector('i svg use, i use');
+            const iconCls = leaf.querySelector('i')?.className || '';
+            const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls;
+            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+
+            if (href.includes('taolun')) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = leaf;
+              break;
+            }
+          }
         }
 
         if (firstIncompleteIdx === -1) {

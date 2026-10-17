@@ -6,6 +6,7 @@ import type {
 } from '@ykt/contracts';
 import {
   CourseBrushController,
+  buildDetectAndJumpToFirstIncompleteScript,
   parseCourseBrushAiAnswer,
 } from '../../apps/desktop/main/course-brush-controller.js';
 import type { BrowserController } from '../../apps/desktop/main/browser-controller.js';
@@ -406,4 +407,126 @@ describe('CourseBrushController', () => {
     expect(confirmLog).toBeDefined();
     expect(confirmLog?.level).toBe('info');
   });
+
+  it('buildDetectAndJumpToFirstIncompleteScript prioritizes uncompleted video/homework over discussions', () => {
+    const script = buildDetectAndJumpToFirstIncompleteScript({
+      enableVideo: true,
+      enableCourseware: true,
+      enableDiscussion: true,
+      enableHomework: true,
+      playbackRate: 2,
+      muteAudio: true,
+      autoSubmitHomework: true,
+    });
+    expect(script).toContain('Pass 1: Prioritize core learning materials');
+    expect(script).toContain('Pass 2: Fallback to discussion if enabled');
+    expect(script).toContain('__ykt_commented_discussions');
+  });
+
+  it('switches video playback speed to configured rate and logs success', async () => {
+    const videoProbe: CourseBrushPageProbe = {
+      url: 'https://www.yuketang.cn/ai-workspace/lms-graph/25055051/video/102',
+      title: '第3节 核心概念讲解',
+      route: 'ai-workspace',
+      routeLabel: 'AI Workspace · 视频课',
+      directoryItemsTotal: 10,
+      directoryItemsPending: 5,
+      directorySampleTitles: ['第3节 核心概念讲解'],
+      mediaStatus: {
+        hasVideo: true,
+        hasAudio: false,
+        paused: false,
+        playbackRate: 1,
+        progressText: '10%',
+        completed: false,
+      },
+      questionProbe: {
+        found: false,
+        route: 'unknown',
+        questionIndex: 0,
+        totalQuestions: 0,
+        questionType: 'single',
+        typeLabel: '未知',
+        stemText: '',
+        hasEncryptedFont: false,
+        alreadyAnswered: false,
+        options: [],
+        blankCount: 0,
+        submitButtonText: '',
+        canSubmit: false,
+        rect: null,
+      },
+    };
+
+    const executeJavaScript = vi.fn().mockImplementation((script: string) => {
+      if (typeof script === 'string' && script.includes('firstIncompleteItem')) {
+        return Promise.resolve({
+          ready: true,
+          alreadyAtTarget: true,
+          activeIdx: 2,
+          targetIdx: 2,
+          total: 10,
+          title: '第3节 核心概念讲解',
+        });
+      }
+      if (typeof script === 'string' && script.includes('xt-speedbutton')) {
+        return Promise.resolve({
+          found: true,
+          ok: true,
+          clicked: true,
+          clickedText: '2.00X',
+          rate: 2,
+          speedValText: '2.00X',
+        });
+      }
+      return Promise.resolve(videoProbe);
+    });
+
+    const mockBrowser = {
+      webContents: {
+        isDestroyed: () => false,
+        executeJavaScript,
+        setAudioMuted: vi.fn(),
+      },
+      getState: () => ({
+        tabs: [
+          {
+            id: 'tab-1',
+            environment: 'standard',
+            url: videoProbe.url,
+            title: videoProbe.title,
+            loading: false,
+          },
+        ],
+        activeTabId: 'tab-1',
+        environment: 'standard',
+        url: videoProbe.url,
+        title: videoProbe.title,
+        loading: false,
+        canGoBack: true,
+        canGoForward: false,
+        errorMessage: null,
+        assistantPanelCollapsed: false,
+        networkLabCollapsed: false,
+      }),
+    } as unknown as BrowserController;
+
+    const controller = new CourseBrushController(
+      mockBrowser,
+      () => ({} as YuketangFacade),
+      () => {},
+    );
+
+    await controller.start();
+    await new Promise((r) => setTimeout(r, 60));
+    controller.stop();
+
+    const state = controller.getState();
+    const speedLog = state.logs.find((l) =>
+      l.message.includes('已切换视频播放倍速为 2X'),
+    );
+    expect(speedLog).toBeDefined();
+    expect(speedLog?.level).toBe('success');
+  });
 });
+
