@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   DefaultCourseBrushConfig,
@@ -57,6 +57,22 @@ export class CourseBrushController {
       this.browser.onWebContentsCreated?.((contents) => {
         this.attachWebContentsHooks(contents);
       }) ?? null;
+
+    try {
+      if (app?.isReady?.()) {
+        const cacheFile = join(app.getPath('userData'), 'course-brush-cache.json');
+        readFile(cacheFile, 'utf8')
+          .then((data) => {
+            const arr = JSON.parse(data);
+            if (Array.isArray(arr)) {
+              for (const k of arr) {
+                if (typeof k === 'string' && k) this.#completedLeafKeys.add(k);
+              }
+            }
+          })
+          .catch(() => null);
+      }
+    } catch {}
   }
 
   getState(): CourseBrushState {
@@ -1185,6 +1201,17 @@ export class CourseBrushController {
     for (const k of keys) {
       this.#completedLeafKeys.add(k);
     }
+
+    try {
+      if (app?.isReady?.()) {
+        const cacheFile = join(app.getPath('userData'), 'course-brush-cache.json');
+        void writeFile(
+          cacheFile,
+          JSON.stringify(Array.from(this.#completedLeafKeys)),
+          'utf8',
+        ).catch(() => null);
+      }
+    } catch {}
 
     try {
       const contents = this.browser.webContents;
@@ -2837,7 +2864,7 @@ function buildEnsureMediaAndAntiCheckScript(config: CourseBrushConfig): string {
   })()`;
 }
 
-function buildTriggerNextDirectoryItemScript(
+export function buildTriggerNextDirectoryItemScript(
   route: CourseBrushPageRoute,
   config: CourseBrushConfig,
   processedKeys: readonly string[],
@@ -2882,6 +2909,10 @@ function buildTriggerNextDirectoryItemScript(
     if (route === 'v2-student-log' || route === 'pro-lms-directory') {
       // 1. Check .logs-list .content-box items
       const boxes = queryAllDocs('.logs-list .content-box').filter(isVisible);
+      const candidates = [];
+      let pendingExpandBtn = null;
+      let pendingExpandTitle = '';
+
       for (let i = 0; i < boxes.length; i += 1) {
         const box = boxes[i];
         const headerSection = box.querySelector(':scope > section') || box.querySelector('section') || box;
@@ -2910,13 +2941,16 @@ function buildTriggerNextDirectoryItemScript(
             continue;
           }
           if (subActivities.length === 0 && expandBtn && typeof expandBtn.click === 'function' && !expandText.includes('收起')) {
-            expandBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            expandBtn.click();
-            return { status: 'expanded', key: '', title };
+            if (!pendingExpandBtn) {
+              pendingExpandBtn = expandBtn;
+              pendingExpandTitle = title;
+            }
+            continue;
           }
           const allSubs = subActivities.length > 0
             ? subActivities
             : (leafWrap ? Array.from(leafWrap.querySelectorAll('.activity__wrap')) : []);
+          let chapterHasPending = false;
           for (let j = 0; j < allSubs.length; j += 1) {
             const sub = allSubs[j];
             const subAside = (sub.querySelector('.statistics-box .aside')?.textContent || '').replace(/\\s+/g, ' ').trim();
@@ -2932,20 +2966,21 @@ function buildTriggerNextDirectoryItemScript(
             const isHomework = subTagText.includes('作业') || subTagText.includes('习题') || subTagText.includes('测验') || subHref.includes('zuoye');
             const isDiscuss = subTagText.includes('图文') || subTagText.includes('讨论') || subHref.includes('tuwen') || subHref.includes('taolun');
             const isCourseware = subTagText.includes('课件') || subHref.includes('kejian');
-            if (
-              (isVideoOrAudio && config.enableVideo) ||
-              (isHomework && config.enableHomework) ||
-              (isDiscuss && config.enableDiscussion) ||
-              (isCourseware && config.enableCourseware)
-            ) {
-              sub.scrollIntoView({ behavior: 'instant', block: 'center' });
-              sub.click();
-              const label = isHomework ? '作业' : isVideoOrAudio ? (subTagText.includes('音频') ? '音频' : '视频') : isCourseware ? '课件' : (subTagText || '任务');
-              return { status: 'clicked', key: subKey, title: subTitle, itemType: label };
-            }
+
+            const kind = isVideoOrAudio ? 'video' : isHomework ? 'homework' : isCourseware ? 'courseware' : isDiscuss ? 'discuss' : 'unknown';
+            const label = isHomework ? '作业' : isVideoOrAudio ? (subTagText.includes('音频') ? '音频' : '视频') : isCourseware ? '课件' : (subTagText || '任务');
+
+            candidates.push({
+              el: sub,
+              key: subKey,
+              title: subTitle,
+              kind,
+              label,
+            });
+            chapterHasPending = true;
           }
-          if (allSubs.length > 0 || expandText.includes('收起')) {
-            return { status: 'expanded', key: batchDoneKey, title: title + ' (本章节已处理完毕)' };
+          if (!chapterHasPending && (allSubs.length > 0 || expandText.includes('收起'))) {
+            processed.add(batchDoneKey);
           }
           continue;
         }
@@ -2953,38 +2988,87 @@ function buildTriggerNextDirectoryItemScript(
         const key = 'v2-box-' + i + '-' + title;
         if (processed.has(key)) continue;
 
-        if (itemType === 'shipin' && config.enableVideo) {
-          course.scrollIntoView({ behavior: 'instant', block: 'center' });
-          course.click();
-          return { status: 'clicked', key, title, itemType: '视频' };
-        }
-        if (itemType === 'kejian' && config.enableCourseware) {
+        if (itemType === 'shipin') {
+          candidates.push({ el: course, key, title, kind: 'video', label: '视频' });
+        } else if (itemType === 'kejian') {
           const checkBtn = box.querySelector('.ppt_img_box .check') || course;
-          if (checkBtn && typeof checkBtn.click === 'function') {
-            checkBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            checkBtn.click();
-            return { status: 'clicked', key, title, itemType: '课件' };
-          }
+          candidates.push({ el: checkBtn, key, title, kind: 'courseware', label: '课件' });
+        } else if (itemType === 'ketang') {
+          candidates.push({ el: course, key, title, kind: 'replay', label: '课堂回放' });
+        } else if (itemType === 'zuoye') {
+          candidates.push({ el: course, key, title, kind: 'homework', label: '作业' });
+        } else if (itemType === 'taolun' || itemType === 'tuwen') {
+          candidates.push({ el: course, key, title, kind: 'discuss', label: itemType === 'tuwen' ? '图文' : '讨论' });
         }
-        if (itemType === 'ketang' && config.enableReplay) {
-          course.scrollIntoView({ behavior: 'instant', block: 'center' });
-          course.click();
-          return { status: 'clicked', key, title, itemType: '课堂回放' };
+      }
+
+      // Prioritized execution across all candidates (Video First! Never click discussion when videos remain):
+      // Pass 1: Video Priority
+      if (config.enableVideo) {
+        const v = candidates.find((c) => c.kind === 'video');
+        if (v) {
+          v.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          v.el.click();
+          return { status: 'clicked', key: v.key, title: v.title, itemType: v.label };
         }
-        if (itemType === 'zuoye' && config.enableHomework) {
-          course.scrollIntoView({ behavior: 'instant', block: 'center' });
-          course.click();
-          return { status: 'clicked', key, title, itemType: '作业' };
+      }
+
+      // If video is enabled, but an unexpanded chapter is waiting and no video candidate was found yet, expand it!
+      if (config.enableVideo && pendingExpandBtn) {
+        pendingExpandBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+        pendingExpandBtn.click();
+        return { status: 'expanded', key: '', title: pendingExpandTitle };
+      }
+
+      // Pass 2: Homework Priority
+      if (config.enableHomework) {
+        const h = candidates.find((c) => c.kind === 'homework');
+        if (h) {
+          h.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          h.el.click();
+          return { status: 'clicked', key: h.key, title: h.title, itemType: h.label };
         }
-        if ((itemType === 'taolun' || itemType === 'tuwen') && config.enableDiscussion) {
-          course.scrollIntoView({ behavior: 'instant', block: 'center' });
-          course.click();
-          return { status: 'clicked', key, title, itemType: itemType === 'tuwen' ? '图文' : '讨论' };
+      }
+
+      // Pass 3: Courseware Priority
+      if (config.enableCourseware) {
+        const cw = candidates.find((c) => c.kind === 'courseware');
+        if (cw) {
+          cw.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          cw.el.click();
+          return { status: 'clicked', key: cw.key, title: cw.title, itemType: cw.label };
         }
+      }
+
+      // Pass 4: Classroom replay
+      if (config.enableReplay) {
+        const r = candidates.find((c) => c.kind === 'replay');
+        if (r) {
+          r.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          r.el.click();
+          return { status: 'clicked', key: r.key, title: r.title, itemType: r.label };
+        }
+      }
+
+      // Pass 5: Discussion Priority (ONLY after all video/homework/courseware are exhausted!)
+      if (config.enableDiscussion) {
+        const d = candidates.find((c) => c.kind === 'discuss');
+        if (d) {
+          d.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          d.el.click();
+          return { status: 'clicked', key: d.key, title: d.title, itemType: d.label };
+        }
+      }
+
+      if (pendingExpandBtn) {
+        pendingExpandBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+        pendingExpandBtn.click();
+        return { status: 'expanded', key: '', title: pendingExpandTitle };
       }
 
       // 2. Check .leaf-detail items (in main document or embedded /pro/lms/ iframe)
       const leaves = queryAllDocs('.leaf-detail').filter(isVisible);
+      const leafCandidates = [];
       for (let i = 0; i < leaves.length; i += 1) {
         const leaf = leaves[i];
         const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
@@ -3002,16 +3086,41 @@ function buildTriggerNextDirectoryItemScript(
         const isHomework = href.includes('zuoye');
         const isCourseware = href.includes('tuwen') || href.includes('kejian');
         const isDiscuss = href.includes('taolun');
+        const kind = isVideo ? 'video' : isHomework ? 'homework' : isCourseware ? 'courseware' : isDiscuss ? 'discuss' : 'unknown';
+        const label = isHomework ? '作业' : isVideo ? '视频' : isCourseware ? '课件' : '课程内容';
+        leafCandidates.push({ el: leaf, key, title, kind, label });
+      }
 
-        if (
-          (isVideo && config.enableVideo) ||
-          (isHomework && config.enableHomework) ||
-          (isCourseware && config.enableCourseware) ||
-          (isDiscuss && config.enableDiscussion)
-        ) {
-          leaf.scrollIntoView({ behavior: 'instant', block: 'center' });
-          leaf.click();
-          return { status: 'clicked', key, title, itemType: isHomework ? '作业' : isVideo ? '视频' : '课程内容' };
+      if (config.enableVideo) {
+        const v = leafCandidates.find((c) => c.kind === 'video');
+        if (v) {
+          v.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          v.el.click();
+          return { status: 'clicked', key: v.key, title: v.title, itemType: v.label };
+        }
+      }
+      if (config.enableHomework) {
+        const h = leafCandidates.find((c) => c.kind === 'homework');
+        if (h) {
+          h.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          h.el.click();
+          return { status: 'clicked', key: h.key, title: h.title, itemType: h.label };
+        }
+      }
+      if (config.enableCourseware) {
+        const cw = leafCandidates.find((c) => c.kind === 'courseware');
+        if (cw) {
+          cw.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          cw.el.click();
+          return { status: 'clicked', key: cw.key, title: cw.title, itemType: cw.label };
+        }
+      }
+      if (config.enableDiscussion) {
+        const d = leafCandidates.find((c) => c.kind === 'discuss');
+        if (d) {
+          d.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          d.el.click();
+          return { status: 'clicked', key: d.key, title: d.title, itemType: d.label };
         }
       }
 
@@ -3396,6 +3505,13 @@ function buildAdvanceToNextUnitOrBackScript(
       const pct = box.getAttribute('data-ykt-leaf-pct');
       if (pct !== null && Number(pct) >= 99) return true;
 
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId) {
+        if (completedCache.has(leafId)) return true;
+        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
+        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
+      }
+
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
       if (/已完成|已读|已提交|100%/.test(t)) return true;
 
@@ -3409,8 +3525,14 @@ function buildAdvanceToNextUnitOrBackScript(
         return true;
       }
 
-      const leafId = box.getAttribute('data-ykt-leaf-id');
-      if (leafId && completedCache.has(leafId)) return true;
+      const svgs = box.querySelectorAll('svg');
+      for (const s of svgs) {
+        const sHtml = (s.innerHTML || '').toLowerCase();
+        const sCls = (s.getAttribute('class') || '').toLowerCase();
+        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+          return true;
+        }
+      }
 
       try {
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
@@ -3610,6 +3732,13 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       const pct = box.getAttribute('data-ykt-leaf-pct');
       if (pct !== null && Number(pct) >= 99) return true;
 
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId) {
+        if (completedCache.has(leafId)) return true;
+        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
+        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
+      }
+
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
       if (/已完成|已读|已提交|100%/.test(t)) return true;
 
@@ -3623,8 +3752,14 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         return true;
       }
 
-      const leafId = box.getAttribute('data-ykt-leaf-id');
-      if (leafId && completedCache.has(leafId)) return true;
+      const svgs = box.querySelectorAll('svg');
+      for (const s of svgs) {
+        const sHtml = (s.innerHTML || '').toLowerCase();
+        const sCls = (s.getAttribute('class') || '').toLowerCase();
+        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+          return true;
+        }
+      }
 
       try {
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
@@ -3647,6 +3782,50 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       const rawBoxes = Array.from(doc.querySelectorAll('.nav-item-leaf-box'));
       const navItems = rawBoxes.length > 0 ? rawBoxes : Array.from(doc.querySelectorAll('.leaf-item'));
       if (navItems.length > 0) {
+        const aiMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/(\\d+)/i);
+        const aiClassroomId = aiMatch ? aiMatch[1] : '';
+        if (aiClassroomId && (!window.__yktProgressCache || window.__yktProgressCache.classroomId !== aiClassroomId)) {
+          try {
+            const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + aiClassroomId, {
+              credentials: 'include',
+            });
+            if (resp.ok) {
+              const json = await resp.json();
+              const list = [];
+              const byId = {};
+              function walkProgress(nodes) {
+                if (!Array.isArray(nodes)) return;
+                for (const node of nodes) {
+                  if (!node || typeof node !== 'object') continue;
+                  if (Array.isArray(node.section_leaf_list)) {
+                    walkProgress(node.section_leaf_list);
+                  } else if (Array.isArray(node.children)) {
+                    walkProgress(node.children);
+                  } else if (node.id !== undefined && node.progress !== undefined) {
+                    const item = {
+                      id: String(node.id),
+                      name: String(node.name || '').replace(/\\s+/g, ' ').trim(),
+                      leafType: node.leaf_type,
+                      progress: Number(node.progress || 0),
+                    };
+                    list.push(item);
+                    byId[item.id] = item;
+                  }
+                }
+              }
+              walkProgress(json?.data?.course_progress);
+              if (list.length > 0) {
+                window.__yktProgressCache = {
+                  classroomId: aiClassroomId,
+                  ts: Date.now(),
+                  list,
+                  byId,
+                };
+              }
+            }
+          } catch {}
+        }
+
         function normalizeStr(s) {
           return String(s || '').toLowerCase().replace(/^(?:\[?视频\]?|\[?音频\]?|\[?课件\]?|\[?作业\]?|\[?讨论\]?)/g, '').replace(/[^a-z0-9\\u4e00-\\u9fa5]/g, '');
         }

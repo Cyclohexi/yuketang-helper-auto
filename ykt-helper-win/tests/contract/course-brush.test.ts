@@ -7,6 +7,7 @@ import type {
 import {
   CourseBrushController,
   buildDetectAndJumpToFirstIncompleteScript,
+  buildTriggerNextDirectoryItemScript,
   parseCourseBrushAiAnswer,
 } from '../../apps/desktop/main/course-brush-controller.js';
 import type { BrowserController } from '../../apps/desktop/main/browser-controller.js';
@@ -529,7 +530,7 @@ describe('CourseBrushController', () => {
     expect(speedLog?.level).toBe('success');
   });
 
-  it('buildDetectAndJumpToFirstIncompleteScript accurately detects SVG shipin icons, completion checkmarks, and skips discussions to land directly on the first incomplete video', () => {
+  it('buildDetectAndJumpToFirstIncompleteScript accurately detects SVG shipin icons, completion checkmarks, and prefetches server progress', () => {
     const script = buildDetectAndJumpToFirstIncompleteScript(
       {
         enableVideo: true,
@@ -551,6 +552,29 @@ describe('CourseBrushController', () => {
     expect(script).toContain('leaf-999');
     expect(script).toContain('Pass 1: Prioritize core learning materials');
     expect(script).toContain('Pass 2: Fallback to discussion if enabled');
+    expect(script).toContain('/c27/online_courseware/schedule/course/progress/?classroom_id=');
+  });
+
+  it('buildTriggerNextDirectoryItemScript strictly prioritizes uncompleted videos and never clicks discussions when videos remain', () => {
+    const script = buildTriggerNextDirectoryItemScript(
+      'v2-student-log',
+      {
+        enableVideo: true,
+        enableCourseware: true,
+        enableDiscussion: true,
+        enableHomework: true,
+        playbackRate: 2,
+        muteAudio: true,
+        autoSubmitHomework: true,
+      },
+      [],
+    );
+
+    // Verify multi-pass prioritized candidate resolution
+    expect(script).toContain('Pass 1: Video Priority');
+    expect(script).toContain('Pass 5: Discussion Priority');
+    expect(script).toContain('candidates.find((c) => c.kind === \'video\')');
+    expect(script).toContain('candidates.find((c) => c.kind === \'discuss\')');
   });
 });
 
