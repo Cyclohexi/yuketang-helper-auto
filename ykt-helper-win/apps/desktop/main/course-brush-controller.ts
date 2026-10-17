@@ -2917,7 +2917,16 @@ export function buildTriggerNextDirectoryItemScript(
         const box = boxes[i];
         const headerSection = box.querySelector(':scope > section') || box.querySelector('section') || box;
         const asideText = (headerSection.querySelector('.statistics-box .aside')?.textContent || '').replace(/\\s+/g, ' ').trim();
-        if (asideText.includes('已完成') || asideText.includes('已读') || isFractionDone(asideText)) {
+        const headerStatHtml = (headerSection.querySelector('.statistics-box')?.innerHTML || '').toLowerCase();
+        if (
+          asideText.includes('已完成') ||
+          asideText.includes('已读') ||
+          asideText.includes('已发表') ||
+          asideText.includes('已参与') ||
+          asideText.includes('已讨论') ||
+          isFractionDone(asideText) ||
+          /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(headerStatHtml)
+        ) {
           continue;
         }
 
@@ -2954,7 +2963,16 @@ export function buildTriggerNextDirectoryItemScript(
           for (let j = 0; j < allSubs.length; j += 1) {
             const sub = allSubs[j];
             const subAside = (sub.querySelector('.statistics-box .aside')?.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (subAside.includes('已完成') || subAside.includes('已读') || isFractionDone(subAside)) continue;
+            const subStatHtml = (sub.querySelector('.statistics-box')?.innerHTML || '').toLowerCase();
+            const subIsDone =
+              subAside.includes('已完成') ||
+              subAside.includes('已读') ||
+              subAside.includes('已发表') ||
+              subAside.includes('已参与') ||
+              subAside.includes('已讨论') ||
+              isFractionDone(subAside) ||
+              /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(subStatHtml);
+            if (subIsDone) continue;
             const subTagText = (sub.querySelector('.tag')?.textContent || '').trim();
             const subUse = sub.querySelector('.tag use') || sub.querySelector('.tag svg use');
             const subHref = subUse ? (subUse.getAttribute('xlink:href') || subUse.getAttribute('href') || '') : '';
