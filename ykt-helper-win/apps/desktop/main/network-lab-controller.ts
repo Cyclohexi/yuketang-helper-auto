@@ -15,6 +15,11 @@ import {
 
 import { ElectronNetworkObserver } from './electron-network-observer.js';
 
+export interface NetworkEntryArchive {
+  append(entry: NetworkEntry): void;
+  close(): void;
+}
+
 export class NetworkLabController {
   readonly recorder: NetworkRecorder;
   readonly #normalizers = new NormalizerPipeline();
@@ -31,11 +36,12 @@ export class NetworkLabController {
     private readonly onStateChanged: (state: NetworkCaptureState) => void,
     lessonCollector?: BrowserLessonCollector,
     recorder: NetworkRecorder = new NetworkRecorder(),
+    private readonly archive?: NetworkEntryArchive,
   ) {
     this.recorder = recorder;
     this.#lessonCollector = lessonCollector;
     this.#deepCapture = recorder.captureProfile.deepCaptureByDefault;
-    this.attach(contents);
+    void this.attach(contents);
     this.recorder.subscribe((entry) => this.handleEntry(entry));
   }
 
@@ -54,7 +60,7 @@ export class NetworkLabController {
     this.emitState();
   }
 
-  attach(contents: WebContents): void {
+  async attach(contents: WebContents): Promise<void> {
     if (this.#observers.has(contents.id)) return;
     const capturesSession = this.#sessionObserverId === null;
     if (capturesSession) this.#sessionObserverId = contents.id;
@@ -72,6 +78,10 @@ export class NetworkLabController {
       }
     });
     if (this.#started) {
+      // start() installs the debugger event handlers and issues Network.enable
+      // synchronously before its first await. Do not make browser navigation
+      // wait for the CDP acknowledgement: a brand-new WebContents can require
+      // its first navigation before that acknowledgement is delivered.
       void observer
         .start()
         .then(async () => {
@@ -114,6 +124,7 @@ export class NetworkLabController {
   destroy(): void {
     for (const observer of this.#observers.values()) observer.destroy();
     this.#observers.clear();
+    this.archive?.close();
   }
 
   private getState(): NetworkCaptureState {
@@ -132,6 +143,7 @@ export class NetworkLabController {
   }
 
   private handleEntry(entry: NetworkEntry): void {
+    this.archive?.append(entry);
     this.onEntry(entry);
     if (isRawNetworkEntry(entry)) {
       for (const event of this.#normalizers.normalize(entry)) {

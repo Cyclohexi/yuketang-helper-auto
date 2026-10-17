@@ -1,5 +1,6 @@
 import {
   BrowserEnvironment,
+  lessonIdFromBrowserUrl,
   type AnswerValue,
   type Presentation,
   type Slide,
@@ -33,6 +34,7 @@ export interface ObservedBrowserWebSocketFrame {
   requestId: string;
   direction: 'sent' | 'received' | 'closed';
   payload: string | null;
+  contextId?: string;
 }
 
 interface LessonWatch {
@@ -58,6 +60,7 @@ interface ArchivedReportState {
 export class BrowserLessonCollector {
   readonly #lessons = new Map<string, LessonWatch>();
   readonly #socketLessons = new Map<string, string>();
+  readonly #contextLessons = new Map<string, string>();
   readonly #archivedReports = new Map<string, ArchivedReportState>();
   readonly #archivedListeners = new Set<
     (
@@ -94,15 +97,28 @@ export class BrowserLessonCollector {
     for (const [requestId, mappedLessonId] of this.#socketLessons) {
       if (mappedLessonId === lessonId) this.#socketLessons.delete(requestId);
     }
+    for (const [contextId, mappedLessonId] of this.#contextLessons) {
+      if (mappedLessonId === lessonId) this.#contextLessons.delete(contextId);
+    }
   }
 
   clear(): void {
     this.#lessons.clear();
     this.#socketLessons.clear();
+    this.#contextLessons.clear();
     for (const report of this.#archivedReports.values()) {
       if (report.emitTimer) clearTimeout(report.emitTimer);
     }
     this.#archivedReports.clear();
+  }
+
+  observeNavigation(contextId: string, url: string): void {
+    const lessonId = lessonIdFromBrowserUrl(url);
+    if (lessonId && this.#lessons.has(lessonId)) {
+      this.#contextLessons.set(contextId, lessonId);
+    } else {
+      this.#contextLessons.delete(contextId);
+    }
   }
 
   async observeHttp(input: ObservedBrowserHttpResponse): Promise<void> {
@@ -133,7 +149,11 @@ export class BrowserLessonCollector {
       url.searchParams.get('presentation_id') ??
       url.searchParams.get('presentationId') ??
       presentationIdFromResponse(value);
-    const match = this.findLesson(environment, responsePresentationId);
+    const match = this.findLesson(
+      environment,
+      responsePresentationId,
+      input.contextId,
+    );
     if (!match) return;
 
     const [lessonId, watch] = match;
@@ -200,6 +220,9 @@ export class BrowserLessonCollector {
       const lessonId = helloLessonId(message);
       if (lessonId && this.#lessons.has(lessonId)) {
         this.#socketLessons.set(input.requestId, lessonId);
+        if (input.contextId) {
+          this.#contextLessons.set(input.contextId, lessonId);
+        }
       }
       return;
     }
@@ -217,7 +240,17 @@ export class BrowserLessonCollector {
   private findLesson(
     environment: BrowserEnvironment,
     presentationId: string | null,
+    contextId?: string,
   ): [string, LessonWatch] | null {
+    const contextLessonId = contextId
+      ? this.#contextLessons.get(contextId)
+      : undefined;
+    if (contextLessonId) {
+      const contextWatch = this.#lessons.get(contextLessonId);
+      if (contextWatch?.environment === environment) {
+        return [contextLessonId, contextWatch];
+      }
+    }
     const candidates = [...this.#lessons.entries()].filter(
       ([, watch]) => watch.environment === environment,
     );

@@ -69,7 +69,9 @@ export interface NetworkCaptureProfile {
 
 const SAFE_CAPTURE_PROFILE: NetworkCaptureProfile = Object.freeze({
   mode: 'safe',
-  deepCaptureByDefault: false,
+  // Preserve sanitized XHR/fetch bodies and WebSocket frames for the bounded
+  // persistent archive. The limits below prevent unbounded response reads.
+  deepCaptureByDefault: true,
   responseBodyLimitBytes: 64 * 1024,
   resourceBufferLimitBytes: 2 * 1024 * 1024,
   totalBufferLimitBytes: 8 * 1024 * 1024,

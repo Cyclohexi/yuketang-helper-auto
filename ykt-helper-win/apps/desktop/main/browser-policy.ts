@@ -1,8 +1,13 @@
 import {
+  BrowserEnvironment,
   BrowserTargets,
-  type BrowserEnvironment,
   type BrowserTarget,
 } from '@ykt/contracts';
+
+interface StoredBrowserUser {
+  readonly environment: BrowserEnvironment;
+  readonly updatedAt: string;
+}
 
 export function isAllowedYuketangUrl(value: string): boolean {
   try {
@@ -45,6 +50,23 @@ export function environmentForUrl(
   } catch {
     return undefined;
   }
+}
+
+export function preferredBrowserEnvironment(
+  configured: BrowserEnvironment | undefined,
+  users: readonly (StoredBrowserUser | null)[],
+): BrowserEnvironment {
+  const knownUsers = users
+    .filter((user): user is StoredBrowserUser => user !== null)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  if (
+    configured &&
+    (knownUsers.length === 0 ||
+      knownUsers.some((user) => user.environment === configured))
+  ) {
+    return configured;
+  }
+  return knownUsers[0]?.environment ?? configured ?? BrowserEnvironment.Standard;
 }
 
 export function resolveYuketangNavigation(

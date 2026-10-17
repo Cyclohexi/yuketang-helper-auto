@@ -58,3 +58,30 @@ export function isBrowserEnvironment(
 ): value is BrowserEnvironment {
   return BrowserTargets.some((target) => target.id === value);
 }
+
+export function lessonIdFromBrowserUrl(
+  value: string | null | undefined,
+): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      url.hostname !== 'yuketang.cn' &&
+      !url.hostname.endsWith('.yuketang.cn')
+    ) {
+      return null;
+    }
+    const patterns = [
+      /\/lesson\/fullscreen\/v3\/([^/]+)/,
+      /\/m\/v2\/lesson\/student\/([^/]+)/,
+      /\/v2\/web\/lesson\/([^/]+)/,
+    ];
+    for (const pattern of patterns) {
+      const match = pattern.exec(url.pathname);
+      if (match?.[1]) return decodeURIComponent(match[1]);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}

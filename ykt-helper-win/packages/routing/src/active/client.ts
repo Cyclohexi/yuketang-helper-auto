@@ -184,7 +184,7 @@ export class YuketangActiveClient {
   async checkin(
     environment: BrowserEnvironment,
     lessonId: string,
-    classroomId?: string,
+    _classroomId?: string,
   ): Promise<CheckinResult> {
     const adapter = hostAdapterFor(environment);
     const response = await this.request(environment, {
@@ -192,8 +192,8 @@ export class YuketangActiveClient {
       url: adapter.checkinUrl,
       headers: {},
       body: JSON.stringify({
+        source: 5,
         lessonId,
-        ...(classroomId ? { classroomId } : {}),
       }),
     });
     const result = adapter.parseCheckin(response.body, this.#now());

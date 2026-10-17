@@ -15,6 +15,10 @@ interface LessonTokenState extends CheckinResult {
 
 export class SessionManager {
   readonly #credentials = new Map<BrowserEnvironment, BrowserCredentials>();
+  readonly #lastLoadedBearerTokens = new Map<
+    BrowserEnvironment,
+    string | null
+  >();
   readonly #lessonTokens = new Map<string, LessonTokenState>();
 
   constructor(
@@ -50,9 +54,15 @@ export class SessionManager {
   ): Promise<Readonly<Record<string, string>>> {
     const loaded = await this.source.load(environment);
     const current = this.#credentials.get(environment);
+    const previousLoadedBearer = this.#lastLoadedBearerTokens.get(environment);
+    this.#lastLoadedBearerTokens.set(environment, loaded.bearerToken);
+    const bearerToken =
+      loaded.bearerToken !== previousLoadedBearer
+        ? (loaded.bearerToken ?? current?.bearerToken ?? null)
+        : (current?.bearerToken ?? loaded.bearerToken ?? null);
     const credentials = {
       cookieHeader: loaded.cookieHeader,
-      bearerToken: current?.bearerToken ?? loaded.bearerToken,
+      bearerToken,
       userId: loaded.userId ?? current?.userId ?? null,
     };
     this.#credentials.set(environment, credentials);
@@ -81,16 +91,14 @@ export class SessionManager {
   ): Promise<void> {
     const setAuth = header(response.headers, 'set-auth');
     if (setAuth) {
+      const nextBearer = setAuth.replace(/^Bearer\s+/i, '');
       const current = this.#credentials.get(environment);
       this.#credentials.set(environment, {
         cookieHeader: current?.cookieHeader ?? '',
-        bearerToken: setAuth.replace(/^Bearer\s+/i, ''),
+        bearerToken: nextBearer,
         userId: current?.userId ?? null,
       });
-      await this.source.saveBearerToken?.(
-        environment,
-        setAuth.replace(/^Bearer\s+/i, ''),
-      );
+      await this.source.saveBearerToken?.(environment, nextBearer);
     }
     if (response.status === 401 || response.status === 403) {
       const current = this.#credentials.get(environment);
@@ -100,6 +108,7 @@ export class SessionManager {
           bearerToken: null,
         });
       }
+      this.#lastLoadedBearerTokens.delete(environment);
       for (const [lessonId, state] of this.#lessonTokens) {
         if (state.environment === environment)
           this.#lessonTokens.delete(lessonId);
@@ -136,6 +145,7 @@ export class SessionManager {
 
   clear(): void {
     this.#credentials.clear();
+    this.#lastLoadedBearerTokens.clear();
     this.#lessonTokens.clear();
   }
 }

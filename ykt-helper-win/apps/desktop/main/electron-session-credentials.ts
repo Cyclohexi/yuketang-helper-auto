@@ -38,6 +38,25 @@ export class ElectronSessionCredentialSource implements SessionCredentialSource 
     environment: BrowserEnvironment,
     value: string | null,
   ): Promise<void> {
+    await this.persistBearerToken(environment, value);
+    try {
+      const adapter = hostAdapterFor(environment);
+      const contents = this.getContents();
+      if (new URL(contents.getURL()).origin === adapter.origin) {
+        const script = value
+          ? `localStorage.setItem('Authorization', ${JSON.stringify(`Bearer ${value}`)})`
+          : "localStorage.removeItem('Authorization')";
+        await contents.executeJavaScript(script, true);
+      }
+    } catch {
+      // Ignore when the browser page is navigating or unavailable.
+    }
+  }
+
+  private async persistBearerToken(
+    environment: BrowserEnvironment,
+    value: string | null,
+  ): Promise<void> {
     const key = tokenKey(environment);
     if (value) await this.secrets.set(key, value);
     else await this.secrets.delete(key);
@@ -56,7 +75,7 @@ export class ElectronSessionCredentialSource implements SessionCredentialSource 
         );
         if (typeof value === 'string' && value) {
           const token = value.replace(/^Bearer\s+/i, '');
-          await this.saveBearerToken(environment, token);
+          await this.persistBearerToken(environment, token);
           return token;
         }
       }

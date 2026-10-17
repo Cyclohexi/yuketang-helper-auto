@@ -1,7 +1,9 @@
 import { BrowserEnvironment } from '@ykt/contracts';
 import { describe, expect, it } from 'vitest';
 
+import { YuketangActiveClient } from './active/client.js';
 import { hostAdapterFor, normalizeTimestamp } from './active/host-adapter.js';
+import { BrowserLessonCollector } from './active/browser-lesson-collector.js';
 import { FetchHttpTransport } from './active/http-transport.js';
 import {
   LessonWebSocketManager,
@@ -107,6 +109,52 @@ describe('M4 active routing', () => {
     expect(savedTokens).toEqual(['fresh-token', null]);
   });
 
+  it('adopts updated browser localStorage bearer tokens and sends source=5 on checkin', async () => {
+    let browserToken = 'old-lesson-jwt';
+    const sessions = new SessionManager({
+      load: async () => ({
+        cookieHeader: 'sessionid=123',
+        bearerToken: browserToken,
+        userId: '42',
+      }),
+    });
+    expect(await sessions.headers(BrowserEnvironment.Changjiang)).toMatchObject({
+      authorization: 'Bearer old-lesson-jwt',
+    });
+
+    browserToken = 'new-lesson-jwt';
+    expect(await sessions.headers(BrowserEnvironment.Changjiang)).toMatchObject({
+      authorization: 'Bearer new-lesson-jwt',
+    });
+
+    const requests: { url: string; body: string | null; headers: Readonly<Record<string, string>> }[] = [];
+    const client = new YuketangActiveClient({
+      credentials: {
+        load: async () => ({
+          cookieHeader: 'sessionid=123',
+          bearerToken: browserToken,
+          userId: '42',
+        }),
+      },
+      transport: {
+        request: async (req) => {
+          requests.push({ url: req.url, body: req.body, headers: req.headers });
+          return {
+            status: 200,
+            headers: { 'set-auth': 'refreshed-lesson-jwt' },
+            body: { code: 0, data: { lessonToken: 'refreshed-lesson-jwt' } },
+          };
+        },
+      },
+    });
+
+    await client.checkin(BrowserEnvironment.Changjiang, 'lesson-new', 'classroom-1');
+    expect(JSON.parse(requests[0]?.body ?? '{}')).toEqual({
+      source: 5,
+      lessonId: 'lesson-new',
+    });
+  });
+
   it('reconnects while deduplicating messages across sockets', () => {
     const sockets: FakeSocket[] = [];
     let reconnect: (() => void) | undefined;
@@ -179,6 +227,65 @@ describe('M4 active routing', () => {
     expect(JSON.stringify(recorder.entries[0])).not.toContain(
       'response-secret',
     );
+  });
+
+  it('routes presentation responses by browser tab when two lessons are active', async () => {
+    const collector = new BrowserLessonCollector();
+    const first: unknown[] = [];
+    const second: unknown[] = [];
+    collector.watchLesson(
+      BrowserEnvironment.Changjiang,
+      'lesson-1',
+      null,
+      (observation) => {
+        first.push(observation);
+      },
+    );
+    collector.watchLesson(
+      BrowserEnvironment.Changjiang,
+      'lesson-2',
+      null,
+      (observation) => {
+        second.push(observation);
+      },
+    );
+    collector.observeNavigation(
+      'tab-2',
+      'https://changjiang.yuketang.cn/lesson/fullscreen/v3/lesson-2/exercise/9',
+    );
+
+    await collector.observeHttp({
+      url: 'https://changjiang.yuketang.cn/api/v3/lesson/presentation/fetch?presentation_id=presentation-2',
+      statusCode: 200,
+      contextId: 'tab-2',
+      body: JSON.stringify({
+        data: {
+          id: 'presentation-2',
+          slides: [
+            {
+              id: 'slide-2',
+              problem: {
+                problemId: 'problem-2',
+                problemType: 1,
+                content: '1+1=',
+                options: ['1', '2', '3', '4'],
+              },
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([
+      expect.objectContaining({
+        type: 'presentation',
+        presentation: expect.objectContaining({
+          id: 'presentation-2',
+          lessonId: 'lesson-2',
+        }),
+      }),
+    ]);
   });
 });
 

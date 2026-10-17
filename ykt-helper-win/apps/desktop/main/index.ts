@@ -38,7 +38,10 @@ import {
 import electronSquirrelStartup from 'electron-squirrel-startup';
 
 import { BrowserController } from './browser-controller.js';
-import { isClassroomUrl } from './browser-policy.js';
+import {
+  isClassroomUrl,
+  preferredBrowserEnvironment,
+} from './browser-policy.js';
 import { createDesktopCliHandler } from './cli-handler.js';
 import { createCliDesktopControls } from './cli-desktop-controls.js';
 import { DesktopCliServer } from './cli-server.js';
@@ -54,6 +57,7 @@ import { WebProbeController } from './web-probe-controller.js';
 import { webProbePage, analyzeInWorker } from './electron-web-probe.js';
 import { NetworkLabController } from './network-lab-controller.js';
 import { createNetworkRecorderForDesktop } from './network-recorder-factory.js';
+import { PersistentNetworkArchive } from './persistent-network-archive.js';
 import { isSourceModuleId, sourceModulePath } from './source-modules.js';
 
 let assignmentAssets: AssignmentAssets | undefined;
@@ -404,7 +408,9 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SubmitAnswer, async (event, input: unknown) => {
     assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
     assertAnswerInput(input);
-    return getRuntime().facade.submitAnswer(input);
+    const result = await getRuntime().facade.submitAnswer(input);
+    await browserController?.syncAnsweredProblem(input.problemId, input.answer);
+    return result;
   });
 
   ipcMain.handle(IpcChannel.GetBrowserState, (event) => {
@@ -859,14 +865,28 @@ async function createWindow(): Promise<void> {
   });
   mainWindow = window;
 
+  let dataStoreForBrowserState: SqliteAppDataStore | undefined;
+  let persistedBrowserEnvironment: BrowserEnvironment | undefined;
   const nextBrowserController = new BrowserController(window, (state) => {
     if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
       window.webContents.send(IpcChannel.BrowserStateChanged, state);
+    }
+    if (
+      dataStoreForBrowserState &&
+      state.environment !== persistedBrowserEnvironment
+    ) {
+      persistedBrowserEnvironment = state.environment;
+      void dataStoreForBrowserState
+        .updateSettings({ browserEnvironment: state.environment })
+        .catch((error: unknown) =>
+          console.error('Unable to persist browser environment.', error),
+        );
     }
     syncScreenWakeLock();
   });
   browserController = nextBrowserController;
   const browserLessonCollector = new BrowserLessonCollector();
+  const storageDirectory = join(app.getPath('userData'), 'storage');
   const networkRecorder = await createNetworkRecorderForDesktop({
     argv: process.argv,
     isPackaged: app.isPackaged,
@@ -886,10 +906,13 @@ async function createWindow(): Promise<void> {
     },
     browserLessonCollector,
     networkRecorder,
+    new PersistentNetworkArchive(
+      join(storageDirectory, 'network-capture.sqlite'),
+    ),
   );
-  nextBrowserController.onWebContentsCreated((contents) => {
-    nextNetworkLabController.attach(contents);
-  });
+  nextBrowserController.onWebContentsCreated((contents) =>
+    nextNetworkLabController.attach(contents),
+  );
   networkLabController = nextNetworkLabController;
   const nextWebProbeController = new WebProbeController(
     () => webProbePage(nextBrowserController.webContents),
@@ -907,6 +930,7 @@ async function createWindow(): Promise<void> {
       webProbeController = undefined;
     nextNetworkLabController.destroy();
     nextBrowserController.destroy();
+    dataStoreForBrowserState = undefined;
     void cleanupServices();
     keepScreenAwake = false;
     syncScreenWakeLock();
@@ -923,11 +947,16 @@ async function createWindow(): Promise<void> {
     runtime = undefined;
   });
 
-  const storageDirectory = join(app.getPath('userData'), 'storage');
   const dataStore = new SqliteAppDataStore(
     join(storageDirectory, 'yuketang.sqlite'),
   );
   const settings = await dataStore.getSettings();
+  dataStoreForBrowserState = dataStore;
+  persistedBrowserEnvironment = isBrowserEnvironment(
+    settings.browserEnvironment,
+  )
+    ? settings.browserEnvironment
+    : undefined;
   keepScreenAwake = settings.keepScreenAwake;
   if (window.isDestroyed()) {
     dataStore.close();
@@ -1005,19 +1034,23 @@ async function createWindow(): Promise<void> {
   cliServer = windowResources.cliServer;
   await windowResources.cliServer.start();
   if (window.isDestroyed()) return;
-  let initialEnvironment = isBrowserEnvironment(settings.browserEnvironment)
+  const configuredEnvironment = isBrowserEnvironment(
+    settings.browserEnvironment,
+  )
     ? settings.browserEnvironment
     : undefined;
-  if (!initialEnvironment) {
-    const users = await Promise.all([
-      dataStore.getUser(BrowserEnvironment.Standard),
-      dataStore.getUser(BrowserEnvironment.Pro),
-    ]);
-    const recentUser = users
-      .filter((user) => user !== null)
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
-    initialEnvironment = recentUser?.environment ?? BrowserEnvironment.Standard;
+  const users = await Promise.all([
+    dataStore.getUser(BrowserEnvironment.Standard),
+    dataStore.getUser(BrowserEnvironment.Pro),
+    dataStore.getUser(BrowserEnvironment.Changjiang),
+  ]);
+  const initialEnvironment = preferredBrowserEnvironment(
+    configuredEnvironment,
+    users,
+  );
+  if (initialEnvironment !== configuredEnvironment) {
     await dataStore.updateSettings({ browserEnvironment: initialEnvironment });
+    persistedBrowserEnvironment = initialEnvironment;
   }
   const browserStart = nextBrowserController.start(initialEnvironment);
   try {

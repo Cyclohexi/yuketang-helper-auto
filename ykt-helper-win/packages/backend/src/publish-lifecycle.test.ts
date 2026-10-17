@@ -18,10 +18,7 @@ describe('classroom publish lifecycle', () => {
     expect(fixture.runtime.lessons.getSession('7')?.lesson.status).toBe(
       'ended',
     );
-    expect(await fixture.runtime.facade.getProblem('11')).toMatchObject({
-      id: '11',
-      prompt: 'Question 11',
-    });
+    expect(await fixture.runtime.facade.listProblems('7')).toEqual([]);
   });
 
   it.each(['before', 'after'] as const)(
@@ -36,9 +33,18 @@ describe('classroom publish lifecycle', () => {
       if (arrival === 'after') await fixture.publish('11');
 
       expect(fixture.notices).toEqual(noticesAtFinish);
-      expect(await fixture.runtime.facade.listProblems('7')).toHaveLength(2);
+      expect(await fixture.runtime.facade.listProblems('7')).toHaveLength(0);
     },
   );
+
+  it('keeps already collected history after leaving a finished lesson', async () => {
+    const fixture = await createFixture();
+    await fixture.loadPresentation();
+    await fixture.finish();
+
+    expect(await fixture.runtime.facade.listProblems('7')).toHaveLength(2);
+    expect(fixture.notices.at(-1)?.kind).toBe('lesson-finished');
+  });
 
   it('stops an in-progress replay when the lesson ends between publishes', async () => {
     const fixture = await createFixture();

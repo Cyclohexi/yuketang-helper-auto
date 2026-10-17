@@ -76,7 +76,7 @@ class FakeContents extends EventEmitter {
     return child;
   }
 
-  reload(): void {}
+  readonly reload = vi.fn();
   focus(): void {}
 
   isDestroyed(): boolean {
@@ -200,6 +200,65 @@ describe('embedded browser tabs', () => {
     expect(controller.getState().url).toBe(
       'https://pro.yuketang.cn/m/v2/lesson/student/1764118559357124352/overview',
     );
+  });
+
+  it('waits for network observers before loading a newly opened lesson', async () => {
+    const { BrowserController } =
+      await import('../../apps/desktop/main/browser-controller.js');
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+      getContentBounds: () => ({ width: 1180, height: 800 }),
+      on: vi.fn(),
+    };
+    const controller = new BrowserController(window as never, vi.fn());
+    let releaseObserver: (() => void) | undefined;
+    const observerReady = new Promise<void>((resolve) => {
+      releaseObserver = resolve;
+    });
+    const initialContents = controller.webContents;
+    controller.onWebContentsCreated((contents) => {
+      if (contents !== initialContents) return observerReady;
+    });
+
+    const opening = controller.openLesson(
+      BrowserEnvironment.Changjiang,
+      '1781924596409844096',
+    );
+    await Promise.resolve();
+
+    expect(controller.getState().url).toBe('');
+    releaseObserver?.();
+    await opening;
+    expect(controller.getState().url).toBe(
+      'https://changjiang.yuketang.cn/lesson/fullscreen/v3/1781924596409844096',
+    );
+  });
+
+  it('reuses the current exercise page when connecting its classroom', async () => {
+    const { BrowserController } =
+      await import('../../apps/desktop/main/browser-controller.js');
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+      getContentBounds: () => ({ width: 1180, height: 800 }),
+      on: vi.fn(),
+    };
+    const controller = new BrowserController(window as never, vi.fn());
+    const lessonId = '1781937383609879552';
+    const exerciseUrl = `https://changjiang.yuketang.cn/lesson/fullscreen/v3/${lessonId}/exercise/9`;
+    await controller.navigate(exerciseUrl);
+    const contents = controller.webContents as unknown as FakeContents;
+
+    await controller.openLesson(BrowserEnvironment.Changjiang, lessonId);
+
+    expect(controller.getState().tabs).toHaveLength(1);
+    expect(controller.getState().url).toBe(exerciseUrl);
+    expect(contents.reload).toHaveBeenCalledOnce();
   });
 
   it('captures the active official web view for AI context', async () => {

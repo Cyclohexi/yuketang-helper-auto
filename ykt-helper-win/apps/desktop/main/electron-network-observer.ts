@@ -188,12 +188,19 @@ export class ElectronNetworkObserver {
     if (!requestId) return;
 
     if (method === 'Network.requestWillBeSent') {
+      const requestUrl = params.request?.url ?? '';
       this.#cdpRequests.set(requestId, {
         method: params.request?.method ?? 'GET',
-        url: params.request?.url ?? '',
+        url: requestUrl,
         body: params.request?.postData ?? null,
         headers: flattenUnknownHeaders(params.request?.headers),
       });
+      if (params.type === 'Document') {
+        this.lessonCollector?.observeNavigation(
+          String(this.contents.id),
+          requestUrl,
+        );
+      }
       return;
     }
 
@@ -261,6 +268,7 @@ export class ElectronNetworkObserver {
         requestId,
         direction,
         payload,
+        contextId: String(this.contents.id),
       });
       if (this.#deepCapture) {
         this.recorder.addWebSocket({
@@ -294,6 +302,7 @@ export class ElectronNetworkObserver {
         requestId,
         direction: 'closed',
         payload: null,
+        contextId: String(this.contents.id),
       });
       if (this.#deepCapture) {
         this.recorder.addWebSocket({

@@ -7,6 +7,7 @@ import {
 import {
   BrowserEnvironment,
   isWebAreaBounds,
+  lessonIdFromBrowserUrl,
   type BrowserState,
   type BrowserTabState,
   type Lesson,
@@ -34,11 +35,16 @@ interface BrowserTab {
   environment: BrowserEnvironment;
   loading: boolean;
   errorMessage: string | null;
+  ready: Promise<void>;
 }
+
+type WebContentsCreatedListener = (
+  contents: WebContents,
+) => void | Promise<void>;
 
 export class BrowserController {
   readonly #tabs: BrowserTab[] = [];
-  readonly #contentsListeners = new Set<(contents: WebContents) => void>();
+  readonly #contentsListeners = new Set<WebContentsCreatedListener>();
   #activeTabId = '';
   #nextTabId = 1;
   #networkLabHeight = NETWORK_LAB_EXPANDED_HEIGHT;
@@ -82,9 +88,11 @@ export class BrowserController {
     return this.activeTab().view.webContents;
   }
 
-  onWebContentsCreated(listener: (contents: WebContents) => void): () => void {
+  onWebContentsCreated(listener: WebContentsCreatedListener): () => void {
     this.#contentsListeners.add(listener);
-    for (const tab of this.#tabs) listener(tab.view.webContents);
+    for (const tab of this.#tabs) {
+      tab.ready = waitForTabSetup(tab.ready, listener, tab.view.webContents);
+    }
     return () => this.#contentsListeners.delete(listener);
   }
 
@@ -112,10 +120,13 @@ export class BrowserController {
         : `/lesson/fullscreen/v3/${encodeURIComponent(lessonId)}`;
     const url = new URL(pathname, target.startUrl).toString();
     const existing = this.#tabs.find(
-      (tab) => tab.view.webContents.getURL() === url,
+      (tab) =>
+        tab.environment === environment &&
+        lessonIdFromBrowserUrl(tab.view.webContents.getURL()) === lessonId,
     );
     if (existing) {
       this.activateTab(existing.id);
+      await existing.ready;
       existing.view.webContents.reload();
       return;
     }
@@ -223,6 +234,130 @@ export class BrowserController {
     this.emitState();
   }
 
+  async syncAnsweredProblem(
+    problemId: string,
+    answer: unknown,
+  ): Promise<void> {
+    const script = `(() => {
+      try {
+        const pidStr = ${JSON.stringify(String(problemId))};
+        const answerValue = ${JSON.stringify(answer)};
+        const root = document.querySelector('#app')?.__vue__;
+        if (!root) return false;
+        const store = root.$store;
+        const doneText =
+          (typeof root.$i18n?.t === 'function' && root.$i18n.t('done')) ||
+          '已完成';
+
+        let fullscreenVm = null;
+        const queue = [root];
+        const visited = new Set();
+        while (queue.length > 0) {
+          const vm = queue.shift();
+          if (!vm || visited.has(vm)) continue;
+          visited.add(vm);
+          if (Array.isArray(vm.$children)) {
+            for (const child of vm.$children) queue.push(child);
+          }
+
+          if (vm.problemMap && typeof vm.problemMap.forEach === 'function') {
+            fullscreenVm = vm;
+            vm.problemMap.forEach((slideData, key) => {
+              if (String(key) === pidStr && slideData && slideData.problem) {
+                slideData.problem.result = answerValue;
+              }
+            });
+          }
+
+          if (
+            vm.presentationMap &&
+            typeof vm.presentationMap.forEach === 'function'
+          ) {
+            vm.presentationMap.forEach((presentation) => {
+              const slides = presentation && presentation.slides;
+              if (Array.isArray(slides)) {
+                for (const slide of slides) {
+                  const prob = slide && slide.problem;
+                  if (
+                    prob &&
+                    String(prob.problemId ?? prob.id ?? '') === pidStr
+                  ) {
+                    prob.result = answerValue;
+                  }
+                }
+              }
+            });
+          }
+
+          if (String(vm.problemID ?? '') === pidStr && 'isComplete' in vm) {
+            vm.isComplete = true;
+            vm.canSubmit = 3;
+            vm.sLeaveTime = doneText;
+            if (vm.oProblem) vm.oProblem.result = answerValue;
+            if (vm.summary && typeof vm.summary === 'object') {
+              vm.summary = Object.assign({}, vm.summary, {
+                status: doneText,
+                isComplete: true,
+              });
+            }
+            if (vm.timer) clearInterval(vm.timer);
+          }
+        }
+
+        const cards =
+          (fullscreenVm && Array.isArray(fullscreenVm.cards)
+            ? fullscreenVm.cards
+            : null) ||
+          (store && store.state && Array.isArray(store.state.cards)
+            ? store.state.cards
+            : null);
+        if (cards) {
+          let updated = false;
+          for (let i = 0; i < cards.length; i += 1) {
+            const card = cards[i];
+            if (
+              card &&
+              card.type === 3 &&
+              String(card.problemID ?? card.event?.prob ?? '') === pidStr
+            ) {
+              cards.splice(
+                i,
+                1,
+                Object.assign({}, card, {
+                  status: doneText,
+                  isComplete: true,
+                }),
+              );
+              updated = true;
+            }
+          }
+          if (updated) {
+            if (fullscreenVm && typeof fullscreenVm.setCards === 'function') {
+              fullscreenVm.setCards(cards);
+            } else if (store && typeof store.dispatch === 'function') {
+              store.dispatch('setCards', cards);
+              store.dispatch('setLines', cards);
+            }
+          }
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    })()`;
+
+    for (const tab of this.#tabs) {
+      const contents = tab.view.webContents;
+      if (contents.isDestroyed()) continue;
+      if (!lessonIdFromBrowserUrl(contents.getURL())) continue;
+      try {
+        await contents.executeJavaScript(script, true);
+      } catch {
+        // Ignore script execution errors on unloaded/navigating tabs.
+      }
+    }
+  }
+
   destroy(): void {
     this.#destroying = true;
     for (const tab of this.#tabs) {
@@ -248,11 +383,14 @@ export class BrowserController {
       environment,
       loading: false,
       errorMessage: null,
+      ready: Promise.resolve(),
     };
     this.#tabs.push(tab);
     this.configureNavigation(tab);
     this.configureStateEvents(tab);
-    for (const listener of this.#contentsListeners) listener(view.webContents);
+    for (const listener of this.#contentsListeners) {
+      tab.ready = waitForTabSetup(tab.ready, listener, view.webContents);
+    }
     return tab;
   }
 
@@ -361,6 +499,7 @@ export class BrowserController {
     tab.errorMessage = null;
     this.emitState();
     try {
+      await tab.ready;
       await tab.view.webContents.loadURL(url);
     } catch (error: unknown) {
       if (isNavigationAborted(error)) {
@@ -451,6 +590,14 @@ export class BrowserController {
   private emitState(): void {
     if (this.#tabs.length > 0) this.onStateChanged(this.getState());
   }
+}
+
+function waitForTabSetup(
+  current: Promise<void>,
+  listener: WebContentsCreatedListener,
+  contents: WebContents,
+): Promise<void> {
+  return current.then(() => listener(contents));
 }
 
 function secureWebPreferences(

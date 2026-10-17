@@ -101,7 +101,23 @@ export class LessonSession {
   answerProblem(problemId: string, answer: AnswerValue): void {
     const problem = this.problems.get(problemId);
     if (!problem) return;
-    this.problems.set(problemId, { ...problem, result: answer });
+    const updatedProblem = { ...problem, result: answer };
+    this.problems.set(problemId, updatedProblem);
+    const slide = this.slides.get(problem.slideId);
+    if (slide?.problem?.id === problemId) {
+      this.slides.set(slide.id, { ...slide, problem: updatedProblem });
+    }
+    const presentation = this.presentations.get(problem.presentationId);
+    if (presentation) {
+      this.presentations.set(presentation.id, {
+        ...presentation,
+        slides: presentation.slides.map((item) =>
+          item.id === problem.slideId && item.problem?.id === problemId
+            ? { ...item, problem: updatedProblem }
+            : item,
+        ),
+      });
+    }
 
     const state = this.problemStates.get(problemId);
     if (state) {

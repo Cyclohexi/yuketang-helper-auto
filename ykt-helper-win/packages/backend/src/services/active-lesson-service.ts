@@ -48,6 +48,7 @@ export function isClassroomSimulationLesson(lessonId: string): boolean {
 export class ActiveLessonService {
   readonly #remoteLessons = new Map<string, ActiveLesson>();
   readonly #environments = new Map<string, BrowserEnvironment>();
+  readonly #finishedLessons = new Set<string>();
   readonly #problems: ProblemService;
   readonly #answers = new AnswerService();
   readonly #stopArchivedCollection: () => void;
@@ -93,7 +94,9 @@ export class ActiveLessonService {
   async refreshLessons(
     environment: BrowserEnvironment,
   ): Promise<readonly Lesson[]> {
-    const lessons = await this.client.listLessons(environment);
+    const lessons = (await this.client.listLessons(environment)).filter(
+      (lesson) => !this.#finishedLessons.has(lesson.id),
+    );
     for (const lesson of lessons) {
       this.#remoteLessons.set(lesson.id, lesson);
       this.#environments.set(lesson.id, environment);
@@ -195,6 +198,20 @@ export class ActiveLessonService {
     this.repository
       .getSession(problem.lessonId)
       ?.answerProblem(problem.id, validation.normalizedAnswer);
+    const updatedPresentation = this.repository
+      .getSession(problem.lessonId)
+      ?.presentations.get(problem.presentationId);
+    if (updatedPresentation) {
+      await this.storage.putDocument({
+        key: `${environment}:presentation:${updatedPresentation.id}`,
+        kind: 'presentation',
+        value: JSON.parse(JSON.stringify(updatedPresentation)),
+        updatedAt: new Date(this.clock.now()).toISOString(),
+        expiresAt: new Date(
+          this.clock.now() + 7 * 24 * 60 * 60 * 1000,
+        ).toISOString(),
+      });
+    }
     return {
       problemId: problem.id,
       status: 'submitted',
@@ -390,12 +407,22 @@ export class ActiveLessonService {
     const event = getRealtimeEvent(message);
     if (!event) return;
     if (event.kind === 'lessonfinished') {
+      this.#finishedLessons.add(lessonId);
       this.#pendingUnlocks.delete(lessonId);
       this.#pendingPublishes.delete(lessonId);
       machine.apply({
         type: 'lesson.ended',
         lessonId,
         occurredAt: this.clock.now(),
+      });
+      this.client.closeLesson(lessonId);
+      this.#remoteLessons.delete(lessonId);
+      this.#environments.delete(lessonId);
+      await this.storage.appendLog({
+        level: 'info',
+        scope: 'lesson',
+        message: '课堂已结束，已退出实时监听。',
+        details: { lessonId },
       });
       this.emitNotice({
         kind: 'lesson-finished',

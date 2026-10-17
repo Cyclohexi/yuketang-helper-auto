@@ -10,6 +10,7 @@ import {
 } from 'vue';
 import {
   ProblemType,
+  lessonIdFromBrowserUrl,
   type AiProfileView,
   type AnswerProposal,
   type AppLogEntry,
@@ -241,6 +242,12 @@ const selectedLesson = computed(() =>
   lessons.value.find((lesson) => lesson.id === selectedLessonId.value),
 );
 
+const selectedLessonLabel = computed(() => {
+  const lesson = selectedLesson.value;
+  if (!lesson) return '未选择课堂';
+  return lesson.title || `课堂 ${lesson.id}`;
+});
+
 const selectedProblem = computed(() =>
   problems.value.find((problem) => problem.id === selectedProblemId.value),
 );
@@ -455,6 +462,25 @@ watch(
   },
 );
 
+watch(
+  [() => props.browserUrl, () => lessons.value],
+  ([browserUrl, availableLessons]) => {
+    const browserLessonId = lessonIdFromBrowserUrl(browserUrl);
+    if (
+      !browserLessonId ||
+      browserLessonId === selectedLessonId.value ||
+      !availableLessons.some((lesson) => lesson.id === browserLessonId)
+    ) {
+      return;
+    }
+    setLesson(browserLessonId);
+    if (!connectedLessonIds.has(browserLessonId)) {
+      infoMessage.value = '已识别当前网页课堂，可直接连接';
+    }
+  },
+  { immediate: true },
+);
+
 watch(selectedProblemId, (id) => {
   assignmentAiContext.value = null;
   if (id) aiSlideContextId.value = '';
@@ -523,11 +549,18 @@ async function loadWorkspace(): Promise<void> {
   if (userResult.status === 'fulfilled') user.value = userResult.value;
   else failed.push('用户信息');
   if (lessonResult.status === 'fulfilled') {
-    lessons.value = lessonResult.value;
-    if (!selectedLessonId.value) {
+    const currentLessons = activeLessons(lessonResult.value);
+    lessons.value = currentLessons;
+    const browserLessonId = lessonIdFromBrowserUrl(props.browserUrl);
+    if (
+      browserLessonId &&
+      currentLessons.some((lesson) => lesson.id === browserLessonId)
+    ) {
+      selectedLessonId.value = browserLessonId;
+    } else if (!selectedLessonId.value) {
       selectedLessonId.value =
-        lessonResult.value.find((lesson) => lesson.status === 'active')?.id ??
-        lessonResult.value[0]?.id ??
+        currentLessons.find((lesson) => lesson.status === 'active')?.id ??
+        currentLessons[0]?.id ??
         '';
     }
     if (selectedLessonId.value) {
@@ -552,10 +585,15 @@ async function refreshClassroom(): Promise<void> {
       window.yuketang.refreshUser(props.environment),
       window.yuketang.refreshLessons(props.environment),
     ]);
-    const nextLessons = await window.yuketang.listLessons();
+    const nextLessons = activeLessons(await window.yuketang.listLessons());
     user.value = nextUser;
     lessons.value = nextLessons;
+    const browserLessonId = lessonIdFromBrowserUrl(props.browserUrl);
     selectedLessonId.value =
+      (browserLessonId &&
+      nextLessons.some((lesson) => lesson.id === browserLessonId)
+        ? browserLessonId
+        : undefined) ??
       nextLessons.find((lesson) => lesson.status === 'active')?.id ??
       nextLessons[0]?.id ??
       '';
@@ -845,7 +883,7 @@ async function analyzeLatestProblemOnOpen(): Promise<void> {
   selectedProblemId.value = latest.id;
   aiSlideSelection.value = [];
   await nextTick();
-  if (!aiChatSessions.has(latest.id)) await analyzeProblem(false);
+  if (!aiChatSessions.has(latest.id)) await analyzeProblem(Boolean(settings.value?.llmAutoGenerate));
 }
 
 async function sendAiFollowUp(): Promise<void> {
@@ -1033,7 +1071,8 @@ async function applyAutomaticProposal(
     return;
   }
 
-  const result = await window.yuketang.submitAnswer({
+  try {
+    const result = await window.yuketang.submitAnswer({
     problemId: problem.id,
     answer: proposal.answer,
     proposalId: proposal.id,
@@ -1048,7 +1087,19 @@ async function applyAutomaticProposal(
     problem,
     'Agent 已提交答案',
     `${problemTypeLabel(problem.type)}已由模型完成并提交。`,
-  );
+    );
+  } catch (caught) {
+    const message =
+      caught instanceof Error ? caught.message : String(caught);
+    errorMessage.value = message;
+    infoMessage.value = `自动提交失败：${message}`;
+    await emitLocalNotice(
+      'auto-answer-failed',
+      problem,
+      '自动提交失败',
+      message,
+    );
+  }
 }
 
 function proposalResponseText(proposal: AnswerProposal): string {
@@ -1360,12 +1411,41 @@ async function testNotification(): Promise<void> {
 }
 
 async function handleClassroomNotice(notice: ClassroomNotice): Promise<void> {
+  if (notice.kind === 'lesson-finished') {
+    leaveFinishedLesson(notice.lessonId);
+  }
   const currentSettings = settings.value;
   if (!currentSettings?.notifyProblems || !noticeEnabled(notice.kind)) return;
   const previous = seenNotices.get(notice.dedupeKey);
   if (previous !== undefined && notice.occurredAt - previous < 60_000) return;
   seenNotices.set(notice.dedupeKey, notice.occurredAt);
   await deliverNotice(notice);
+}
+
+function leaveFinishedLesson(lessonId: string): void {
+  connectedLessonIds.delete(lessonId);
+  if (collectingLessonId.value === lessonId) collectingLessonId.value = '';
+  for (const problem of problems.value) {
+    if (problem.lessonId !== lessonId) continue;
+    const timer = scheduledProblems.get(problem.id);
+    if (timer) clearTimeout(timer);
+    scheduledProblems.delete(problem.id);
+    seenAvailableProblems.delete(problem.id);
+  }
+  lessons.value = lessons.value.filter((lesson) => lesson.id !== lessonId);
+  if (selectedLessonId.value !== lessonId) return;
+  selectedLessonId.value = lessons.value[0]?.id ?? '';
+  selectedProblemId.value = '';
+  selectedPresentationId.value = '';
+  selectedSlideId.value = '';
+  problems.value = [];
+  presentations.value = [];
+  infoMessage.value = '课堂已结束，已退出监听';
+  if (selectedLessonId.value) void run('lesson-data', loadLessonData);
+}
+
+function activeLessons(items: readonly Lesson[]): readonly Lesson[] {
+  return items.filter((lesson) => lesson.status !== 'ended');
 }
 
 async function emitLocalNotice(
@@ -1483,7 +1563,7 @@ async function automationTick(): Promise<void> {
       const refreshedLessons = await window.yuketang.refreshLessons(
         props.environment,
       );
-      lessons.value = await window.yuketang.listLessons();
+      lessons.value = activeLessons(await window.yuketang.listLessons());
       const enteredLessonIds = await enterActiveLessons(
         refreshedLessons,
         connectedLessonIds,
@@ -1732,7 +1812,7 @@ function clamp(value: number, min: number, max: number): number {
       <header class="panel-header">
         <div>
           <strong>助手面板</strong>
-          <span>{{ selectedLesson?.title || '未选择课堂' }}</span>
+          <span>{{ selectedLessonLabel }}</span>
         </div>
         <button type="button" class="quiet-button" @click="emit('toggle')">
           收起

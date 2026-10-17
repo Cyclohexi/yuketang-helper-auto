@@ -1,10 +1,14 @@
-import { BrowserEnvironment } from '@ykt/contracts';
+import {
+  BrowserEnvironment,
+  lessonIdFromBrowserUrl,
+} from '@ykt/contracts';
 import { describe, expect, it } from 'vitest';
 
 import {
   environmentForUrl,
   isAllowedYuketangUrl,
   isClassroomUrl,
+  preferredBrowserEnvironment,
   resolveYuketangNavigation,
   targetForEnvironment,
 } from '../../apps/desktop/main/browser-policy.js';
@@ -38,6 +42,34 @@ describe('embedded browser policy', () => {
     );
   });
 
+  it('prefers the only authenticated environment over a stale saved target', () => {
+    expect(
+      preferredBrowserEnvironment(BrowserEnvironment.Standard, [
+        null,
+        null,
+        {
+          environment: BrowserEnvironment.Changjiang,
+          updatedAt: '2026-09-22T12:31:13.221Z',
+        },
+      ]),
+    ).toBe(BrowserEnvironment.Changjiang);
+  });
+
+  it('keeps a configured environment when it has a stored user', () => {
+    expect(
+      preferredBrowserEnvironment(BrowserEnvironment.Standard, [
+        {
+          environment: BrowserEnvironment.Standard,
+          updatedAt: '2026-09-20T00:00:00.000Z',
+        },
+        {
+          environment: BrowserEnvironment.Changjiang,
+          updatedAt: '2026-09-22T00:00:00.000Z',
+        },
+      ]),
+    ).toBe(BrowserEnvironment.Standard);
+  });
+
   it('recognizes only classroom routes for the screen wake lock', () => {
     expect(
       isClassroomUrl('https://pro.yuketang.cn/lesson/fullscreen/v3/123'),
@@ -46,6 +78,20 @@ describe('embedded browser policy', () => {
       isClassroomUrl('https://www.yuketang.cn/m/v2/lesson/student/123'),
     ).toBe(true);
     expect(isClassroomUrl('https://pro.yuketang.cn/web')).toBe(false);
+  });
+
+  it('extracts the classroom id from live and archived classroom pages', () => {
+    expect(
+      lessonIdFromBrowserUrl(
+        'https://changjiang.yuketang.cn/lesson/fullscreen/v3/1781937383609879552/exercise/9',
+      ),
+    ).toBe('1781937383609879552');
+    expect(
+      lessonIdFromBrowserUrl(
+        'https://pro.yuketang.cn/m/v2/lesson/student/1764118559357124352/overview',
+      ),
+    ).toBe('1764118559357124352');
+    expect(lessonIdFromBrowserUrl('https://example.com/lesson/1')).toBeNull();
   });
 
   it('resolves address bar input without leaving Yuketang', () => {
