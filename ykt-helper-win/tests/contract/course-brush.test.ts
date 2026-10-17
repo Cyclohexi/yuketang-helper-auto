@@ -211,4 +211,199 @@ describe('CourseBrushController', () => {
     expect(controller.getState().answeredQuestionCount).toBe(1);
     expect(states.length).toBeGreaterThan(0);
   });
+
+  it('automatically detects and jumps to the first incomplete unit when starting brush in ai-workspace', async () => {
+    const aiProbe: CourseBrushPageProbe = {
+      url: 'https://www.yuketang.cn/ai-workspace/lms-graph/25055051/video/999',
+      title: '第15节 某中途视频',
+      route: 'ai-workspace',
+      routeLabel: 'AI Workspace · 视频课',
+      directoryItemsTotal: 20,
+      directoryItemsPending: 18,
+      directorySampleTitles: ['第2节 倪虹：加快构建房地产发展新模式 (5%)'],
+      mediaStatus: {
+        hasVideo: true,
+        hasAudio: false,
+        paused: false,
+        playbackRate: 2,
+        progressText: '50%',
+        completed: false,
+      },
+      questionProbe: {
+        found: false,
+        route: 'unknown',
+        questionIndex: 0,
+        totalQuestions: 0,
+        questionType: 'single',
+        typeLabel: '未知',
+        stemText: '',
+        hasEncryptedFont: false,
+        alreadyAnswered: false,
+        options: [],
+        blankCount: 0,
+        submitButtonText: '',
+        canSubmit: false,
+        rect: null,
+      },
+    };
+
+    const executedScripts: string[] = [];
+    const executeJavaScript = vi.fn().mockImplementation((script: string) => {
+      executedScripts.push(script);
+      if (typeof script === 'string' && script.includes('firstIncompleteItem')) {
+        return Promise.resolve({
+          ready: true,
+          switched: true,
+          activeIdx: 14,
+          targetIdx: 1,
+          total: 20,
+          title: '第2节 倪虹：加快构建房地产发展新模式 (当前进度 5%)',
+        });
+      }
+      return Promise.resolve(aiProbe);
+    });
+
+    const mockBrowser = {
+      webContents: {
+        isDestroyed: () => false,
+        executeJavaScript,
+        setAudioMuted: vi.fn(),
+      },
+      getState: () => ({
+        tabs: [
+          {
+            id: 'tab-1',
+            environment: 'standard',
+            url: aiProbe.url,
+            title: aiProbe.title,
+            loading: false,
+          },
+        ],
+        activeTabId: 'tab-1',
+        environment: 'standard',
+        url: aiProbe.url,
+        title: aiProbe.title,
+        loading: false,
+        canGoBack: true,
+        canGoForward: false,
+        errorMessage: null,
+        assistantPanelCollapsed: false,
+        networkLabCollapsed: false,
+      }),
+    } as unknown as BrowserController;
+
+    const controller = new CourseBrushController(
+      mockBrowser,
+      () => ({} as YuketangFacade),
+      () => {},
+    );
+
+    await controller.start();
+    await new Promise((r) => setTimeout(r, 60));
+    const state = controller.getState();
+    controller.stop();
+
+    const alignmentLog = state.logs.find((l) =>
+      l.message.includes('自动检测到全课首个未完成任务（第 2/20 节）'),
+    );
+    expect(alignmentLog).toBeDefined();
+    expect(alignmentLog?.level).toBe('info');
+    expect(state.currentTaskTitle).toContain('倪虹：加快构建房地产发展新模式');
+  });
+
+  it('detects when the current page is already the first incomplete unit and proceeds directly', async () => {
+    const aiProbe: CourseBrushPageProbe = {
+      url: 'https://www.yuketang.cn/ai-workspace/lms-graph/25055051/video/101',
+      title: '第2节 倪虹：加快构建房地产发展新模式',
+      route: 'ai-workspace',
+      routeLabel: 'AI Workspace · 视频课',
+      directoryItemsTotal: 20,
+      directoryItemsPending: 18,
+      directorySampleTitles: ['第2节 倪虹：加快构建房地产发展新模式 (5%)'],
+      mediaStatus: {
+        hasVideo: true,
+        hasAudio: false,
+        paused: false,
+        playbackRate: 2,
+        progressText: '5%',
+        completed: false,
+      },
+      questionProbe: {
+        found: false,
+        route: 'unknown',
+        questionIndex: 0,
+        totalQuestions: 0,
+        questionType: 'single',
+        typeLabel: '未知',
+        stemText: '',
+        hasEncryptedFont: false,
+        alreadyAnswered: false,
+        options: [],
+        blankCount: 0,
+        submitButtonText: '',
+        canSubmit: false,
+        rect: null,
+      },
+    };
+
+    const executeJavaScript = vi.fn().mockImplementation((script: string) => {
+      if (typeof script === 'string' && script.includes('firstIncompleteItem')) {
+        return Promise.resolve({
+          ready: true,
+          alreadyAtTarget: true,
+          activeIdx: 1,
+          targetIdx: 1,
+          total: 20,
+          title: '第2节 倪虹：加快构建房地产发展新模式',
+        });
+      }
+      return Promise.resolve(aiProbe);
+    });
+
+    const mockBrowser = {
+      webContents: {
+        isDestroyed: () => false,
+        executeJavaScript,
+        setAudioMuted: vi.fn(),
+      },
+      getState: () => ({
+        tabs: [
+          {
+            id: 'tab-1',
+            environment: 'standard',
+            url: aiProbe.url,
+            title: aiProbe.title,
+            loading: false,
+          },
+        ],
+        activeTabId: 'tab-1',
+        environment: 'standard',
+        url: aiProbe.url,
+        title: aiProbe.title,
+        loading: false,
+        canGoBack: true,
+        canGoForward: false,
+        errorMessage: null,
+        assistantPanelCollapsed: false,
+        networkLabCollapsed: false,
+      }),
+    } as unknown as BrowserController;
+
+    const controller = new CourseBrushController(
+      mockBrowser,
+      () => ({} as YuketangFacade),
+      () => {},
+    );
+
+    await controller.start();
+    await new Promise((r) => setTimeout(r, 60));
+    controller.stop();
+
+    const state = controller.getState();
+    const confirmLog = state.logs.find((l) =>
+      l.message.includes('当前正是全课首个未完成任务（第 2/20 节）'),
+    );
+    expect(confirmLog).toBeDefined();
+    expect(confirmLog?.level).toBe('info');
+  });
 });

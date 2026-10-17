@@ -42,6 +42,8 @@ export class CourseBrushController {
   #playedTicksOnUrl = 0;
   #speedHoverDoneForUrl = '';
   #unitReloadAttempts = new Map<string, number>();
+  #needFirstIncompleteAlignment = true;
+  #lastAlignedClassroomId = '';
   #removeContentsListener: (() => void) | null = null;
 
   constructor(
@@ -146,6 +148,8 @@ export class CourseBrushController {
       return this.getState();
     }
     this.#status = 'running';
+    this.#needFirstIncompleteAlignment = true;
+    this.#lastAlignedClassroomId = '';
     this.#processedDirectoryKeys.clear();
     this.#unitReloadAttempts.clear();
     this.#speedAttemptsByUrl.clear();
@@ -494,6 +498,59 @@ export class CourseBrushController {
       probe.route === 'classroom-replay' ||
       probe.route === 'v2-homework'
     ) {
+      if (probe.route === 'ai-workspace' || probe.route === 'pro-lms-content') {
+        const classroomMatch = probe.url.match(
+          /\/ai-workspace\/lms-graph\/(\d+)/i,
+        );
+        const currentClassroomId = classroomMatch ? classroomMatch[1] : '';
+        if (
+          currentClassroomId &&
+          currentClassroomId !== this.#lastAlignedClassroomId
+        ) {
+          this.#needFirstIncompleteAlignment = true;
+          this.#lastAlignedClassroomId = currentClassroomId;
+        }
+
+        if (this.#needFirstIncompleteAlignment) {
+          const alignResult = await this.alignToFirstIncompleteUnit();
+          if (alignResult.waitingForSidebar) {
+            this.#currentTaskTitle = '正在检测并读取课程目录进度…';
+            this.emitState();
+            await this.sleep(1500);
+            return;
+          }
+          if (alignResult.allCompleted) {
+            this.#needFirstIncompleteAlignment = false;
+            this.#currentTaskTitle = '🎉 当前课程全部任务已完成！';
+            this.log(
+              'success',
+              '🎉 自动检测确认：当前课程所有已启用类型的任务均已完成！',
+            );
+            this.stop();
+            return;
+          }
+          if (alignResult.switched) {
+            this.#needFirstIncompleteAlignment = false;
+            this.#mediaWaitTicks = 0;
+            this.log(
+              'info',
+              `🎯 自动检测到全课首个未完成任务（第 ${(alignResult.targetIdx ?? 0) + 1}/${alignResult.total ?? '?'} 节）：${alignResult.title ?? ''}，正在自动跳转从首个未完成项开刷…`,
+            );
+            this.#currentTaskTitle = `正在跳转至首个未完成项：${alignResult.title ?? ''}`;
+            this.emitState();
+            await this.sleep(2800);
+            return;
+          }
+          if (alignResult.alreadyAtTarget) {
+            this.#needFirstIncompleteAlignment = false;
+            this.log(
+              'info',
+              `🎯 自动检测确认：当前正是全课首个未完成任务（第 ${(alignResult.targetIdx ?? 0) + 1}/${alignResult.total ?? '?'} 节）：${alignResult.title ?? ''}，直接开始刷课`,
+            );
+          }
+        }
+      }
+
       const finishedTask = await this.handleContentOrTaskPage(
         probe,
         isChildTab,
@@ -621,6 +678,42 @@ export class CourseBrushController {
       await this.sleep(2200);
     }
     return true;
+  }
+
+  private async alignToFirstIncompleteUnit(): Promise<{
+    ready: boolean;
+    waitingForSidebar?: boolean;
+    allCompleted?: boolean;
+    alreadyAtTarget?: boolean;
+    switched?: boolean;
+    targetIdx?: number;
+    activeIdx?: number;
+    total?: number;
+    title?: string;
+  }> {
+    const contents = this.browser.webContents;
+    if (!contents || contents.isDestroyed()) {
+      return { ready: false, waitingForSidebar: true };
+    }
+    try {
+      const res = (await contents.executeJavaScript(
+        buildDetectAndJumpToFirstIncompleteScript(this.#config),
+        true,
+      )) as {
+        ready: boolean;
+        waitingForSidebar?: boolean;
+        allCompleted?: boolean;
+        alreadyAtTarget?: boolean;
+        switched?: boolean;
+        targetIdx?: number;
+        activeIdx?: number;
+        total?: number;
+        title?: string;
+      };
+      return res;
+    } catch {
+      return { ready: false, waitingForSidebar: true };
+    }
   }
 
   private async handleContentOrTaskPage(
@@ -3205,6 +3298,228 @@ function buildAdvanceToNextUnitOrBackScript(
     }
 
     return { advanced: false, message: '' };
+  })()`;
+}
+
+export function buildDetectAndJumpToFirstIncompleteScript(
+  config: CourseBrushConfig,
+): string {
+  return `(async () => {
+    const config = ${JSON.stringify(config)};
+    const docs = [document];
+    for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
+      try {
+        if (ifr.contentDocument && ifr.contentDocument.body) docs.push(ifr.contentDocument);
+      } catch {}
+    }
+
+    function isVisible(el) {
+      if (!el || el.nodeType !== 1) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 4 && r.height > 4;
+    }
+
+    function getRightSidebarIconSig(box) {
+      if (!box || !box.querySelectorAll) return '';
+      const svgs = Array.from(box.querySelectorAll('svg'));
+      if (svgs.length === 0) return '';
+      const boxRect = box.getBoundingClientRect();
+      const lastSvg = svgs[svgs.length - 1];
+      const svgRect = lastSvg.getBoundingClientRect();
+      if (svgs.length >= 2 || (boxRect.width > 60 && svgRect.left > boxRect.left + boxRect.width * 0.55)) {
+        return (lastSvg.innerHTML || '').replace(/\\s+/g, ' ').trim();
+      }
+      return '';
+    }
+
+    function isAiBoxDone(box) {
+      if (!box) return false;
+      const attrDone = box.getAttribute('data-ykt-leaf-done');
+      if (attrDone === 'true') return true;
+      if (attrDone === 'false') return false;
+      const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (/已完成|已读|已提交|100%/.test(t)) return true;
+      if (/\\b(is-finished|finished|completed|is-completed|done)\\b/i.test(box.innerHTML || '')) return true;
+      const sig = getRightSidebarIconSig(box);
+      if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
+        return true;
+      }
+      return false;
+    }
+
+    // 1. AI Workspace sidebar check (.nav-item-leaf-box)
+    for (const doc of docs) {
+      const rawBoxes = Array.from(doc.querySelectorAll('.nav-item-leaf-box'));
+      const navItems = rawBoxes.length > 0 ? rawBoxes : Array.from(doc.querySelectorAll('.leaf-item'));
+      if (navItems.length > 0) {
+        const activeCache = window.__yktProgressCache;
+        if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
+          const list = activeCache.list;
+          for (let i = 0; i < navItems.length; i += 1) {
+            const box = navItems[i];
+            if (!box.hasAttribute('data-ykt-leaf-done')) {
+              const boxText = (box.textContent || '').replace(/\\s+/g, ' ').trim();
+              let matched = list[i];
+              if (!matched || (matched.name && !boxText.includes(matched.name.slice(0, 6)))) {
+                matched = list.find((it) => it.name && boxText.includes(it.name));
+              }
+              if (matched) {
+                const pct = Math.min(100, Math.max(0, Math.round((matched.progress || 0) * 100)));
+                const isDone = (matched.progress || 0) >= 0.995;
+                box.setAttribute('data-ykt-leaf-id', matched.id);
+                box.setAttribute('data-ykt-leaf-pct', String(pct));
+                box.setAttribute('data-ykt-leaf-done', isDone ? 'true' : 'false');
+              }
+            }
+          }
+        }
+
+        let activeIdx = navItems.findIndex((el) =>
+          /active|current|is-active|selected/i.test((el.className || '') + ' ' + (el.firstElementChild?.className || '')) ||
+          Boolean(el.querySelector('.is-active, .active'))
+        );
+        if (activeIdx === -1) {
+          const m = location.href.match(/node_id=(\\d+)/i) || location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i);
+          if (m && m[1]) {
+            activeIdx = navItems.findIndex((el) => el.getAttribute('data-ykt-leaf-id') === m[1]);
+          }
+        }
+
+        let firstIncompleteIdx = -1;
+        let firstIncompleteTitle = '';
+        let firstIncompleteItem = null;
+
+        for (let i = 0; i < navItems.length; i += 1) {
+          const item = navItems[i];
+          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!text) continue;
+
+          const isVideo = /^视频|^音频/.test(text) || Boolean(item.querySelector('.tag use[href*="shipin"]'));
+          const isDiscuss = /^讨论|^图文/.test(text) || Boolean(item.querySelector('.tag use[href*="taolun"], .tag use[href*="tuwen"]'));
+          const isHomework = /^作业|^练习|^习题|^测验|^测试|^考试/.test(text) || Boolean(item.querySelector('.tag use[href*="zuoye"]'));
+          const isCourseware = /^课件|^文档/.test(text) || Boolean(item.querySelector('.tag use[href*="kejian"]'));
+
+          if (
+            (isVideo && !config.enableVideo) ||
+            (isDiscuss && !config.enableDiscussion) ||
+            (isHomework && !config.enableHomework) ||
+            (isCourseware && !config.enableCourseware)
+          ) {
+            continue;
+          }
+
+          if (!isAiBoxDone(item)) {
+            firstIncompleteIdx = i;
+            firstIncompleteTitle = text;
+            firstIncompleteItem = item;
+            break;
+          }
+        }
+
+        if (firstIncompleteIdx === -1) {
+          return { ready: true, allCompleted: true, total: navItems.length };
+        }
+
+        const targetPct = firstIncompleteItem.getAttribute('data-ykt-leaf-pct');
+        const pctLabel = targetPct !== null ? ' (当前进度 ' + targetPct + '%)' : '';
+        const fullTitle = firstIncompleteTitle + pctLabel;
+
+        if (firstIncompleteIdx === activeIdx) {
+          return {
+            ready: true,
+            alreadyAtTarget: true,
+            activeIdx,
+            targetIdx: firstIncompleteIdx,
+            total: navItems.length,
+            title: fullTitle,
+          };
+        }
+
+        firstIncompleteItem.scrollIntoView({ behavior: 'instant', block: 'center' });
+        const clickTarget = firstIncompleteItem.querySelector('.leaf-item') || firstIncompleteItem.firstElementChild || firstIncompleteItem;
+        if (clickTarget && typeof clickTarget.click === 'function') {
+          clickTarget.click();
+          return {
+            ready: true,
+            switched: true,
+            activeIdx,
+            targetIdx: firstIncompleteIdx,
+            total: navItems.length,
+            title: fullTitle,
+          };
+        }
+      }
+    }
+
+    // 2. Pro LMS .leaf-detail in catalog
+    for (const doc of docs) {
+      const leaves = Array.from(doc.querySelectorAll('.leaf-detail')).filter(isVisible);
+      if (leaves.length > 0) {
+        let activeIdx = leaves.findIndex((el) => /active|current|is-active|selected/i.test(el.className || ''));
+        let firstIncompleteIdx = -1;
+        let firstIncompleteTitle = '';
+        let firstIncompleteItem = null;
+
+        for (let i = 0; i < leaves.length; i += 1) {
+          const leaf = leaves[i];
+          const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
+          if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
+            continue;
+          }
+          const useEl = leaf.querySelector('i svg use, i use');
+          const iconCls = leaf.querySelector('i')?.className || '';
+          const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls;
+          const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+
+          const isVideo = href.includes('shipin');
+          const isHomework = href.includes('zuoye');
+          const isCourseware = href.includes('tuwen') || href.includes('kejian');
+          const isDiscuss = href.includes('taolun');
+
+          if (
+            (isVideo && !config.enableVideo) ||
+            (isHomework && !config.enableHomework) ||
+            (isCourseware && !config.enableCourseware) ||
+            (isDiscuss && !config.enableDiscussion)
+          ) {
+            continue;
+          }
+
+          firstIncompleteIdx = i;
+          firstIncompleteTitle = text;
+          firstIncompleteItem = leaf;
+          break;
+        }
+
+        if (firstIncompleteIdx === -1) {
+          return { ready: true, allCompleted: true, total: leaves.length };
+        }
+
+        if (firstIncompleteIdx === activeIdx) {
+          return {
+            ready: true,
+            alreadyAtTarget: true,
+            activeIdx,
+            targetIdx: firstIncompleteIdx,
+            total: leaves.length,
+            title: firstIncompleteTitle,
+          };
+        }
+
+        firstIncompleteItem.scrollIntoView({ behavior: 'instant', block: 'center' });
+        firstIncompleteItem.click();
+        return {
+          ready: true,
+          switched: true,
+          activeIdx,
+          targetIdx: firstIncompleteIdx,
+          total: leaves.length,
+          title: firstIncompleteTitle,
+        };
+      }
+    }
+
+    return { ready: false, waitingForSidebar: true };
   })()`;
 }
 
