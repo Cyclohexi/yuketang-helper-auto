@@ -45,6 +45,7 @@ export class CourseBrushController {
   #needFirstIncompleteAlignment = true;
   #lastAlignedClassroomId = '';
   #alignmentAttempts = 0;
+  #completedLeafKeys = new Set<string>();
   #removeContentsListener: (() => void) | null = null;
 
   constructor(
@@ -718,7 +719,10 @@ export class CourseBrushController {
     }
     try {
       const res = (await contents.executeJavaScript(
-        buildDetectAndJumpToFirstIncompleteScript(this.#config),
+        buildDetectAndJumpToFirstIncompleteScript(
+          this.#config,
+          Array.from(this.#completedLeafKeys),
+        ),
         true,
       )) as {
         ready: boolean;
@@ -814,6 +818,7 @@ export class CourseBrushController {
             'success',
             `✅ 刷新后读取左侧栏进度：已完成 (${freshProbe.mediaStatus.progressText ?? '100%'})，待刷目录项剩余 ${freshProbe.directoryItemsPending}/${freshProbe.directoryItemsTotal}：${probe.title}`,
           );
+          await this.markCurrentUnitCompleted(probe);
           return true;
         }
 
@@ -833,6 +838,7 @@ export class CourseBrushController {
           'warn',
           `⚠️ 当前视频已连续刷新补刷 ${attempts} 次，先切换下一未完成单元：${probe.title}`,
         );
+        await this.markCurrentUnitCompleted(probe);
         return true;
       }
 
@@ -840,6 +846,7 @@ export class CourseBrushController {
         'success',
         `✅ 当前学习单元已完成（${probe.mediaStatus.progressText ?? '已完成'}）：${probe.title}`,
       );
+      await this.markCurrentUnitCompleted(probe);
       return true;
     }
 
@@ -912,6 +919,7 @@ export class CourseBrushController {
         return true;
       }
       await this.solveAllQuestionsOnCurrentPage();
+      await this.markCurrentUnitCompleted(probe);
       return true;
     }
 
@@ -934,6 +942,7 @@ export class CourseBrushController {
 
     if (extraResult.action === 'done') {
       this.log('success', `✅ ${extraResult.message}`);
+      await this.markCurrentUnitCompleted(probe);
       return true;
     }
 
@@ -1154,6 +1163,51 @@ export class CourseBrushController {
     }
   }
 
+  private async markCurrentUnitCompleted(
+    probe: CourseBrushPageProbe,
+  ): Promise<void> {
+    const keys: string[] = [];
+    if (probe.url) keys.push(probe.url);
+    const m =
+      probe.url.match(
+        /\/ai-workspace\/lms-graph\/(\d+)\/([^/?#]+)\/(\d+)/i,
+      ) || probe.url.match(/node_id=(\d+)/i);
+    const leafId = m && m[3] ? m[3] : m && m[1] ? m[1] : '';
+    if (leafId) keys.push(leafId);
+    if (probe.title) {
+      const clean = probe.title
+        .replace(/^视频|^音频|^课件|^作业|^讨论/g, '')
+        .replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '')
+        .toLowerCase();
+      if (clean.length >= 3) keys.push(clean);
+    }
+
+    for (const k of keys) {
+      this.#completedLeafKeys.add(k);
+    }
+
+    try {
+      const contents = this.browser.webContents;
+      if (contents && !contents.isDestroyed()) {
+        await contents
+          .executeJavaScript(
+            `(() => {
+              try {
+                const keys = ${JSON.stringify(keys)};
+                const cur = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+                const set = new Set(cur.concat(keys));
+                localStorage.setItem('__ykt_completed_units', JSON.stringify(Array.from(set)));
+              } catch {}
+            })()`,
+            true,
+          )
+          .catch(() => null);
+      }
+    } catch {
+      // Ignore transient script errors
+    }
+  }
+
   private async finishTaskAndReturnToDirectory(
     isChildTab: boolean,
     route: CourseBrushPageRoute,
@@ -1178,6 +1232,7 @@ export class CourseBrushController {
         buildAdvanceToNextUnitOrBackScript(
           this.#config,
           Array.from(this.#processedDirectoryKeys),
+          Array.from(this.#completedLeafKeys),
         ),
         true,
       )) as { advanced: boolean; key?: string; message: string };
@@ -1617,23 +1672,37 @@ function buildDomProbeScript(): string {
         } catch {}
       }
 
+      function normalizeStr(s) {
+        return String(s || '').toLowerCase().replace(/^(?:\[?视频\]?|\[?音频\]?|\[?课件\]?|\[?作业\]?|\[?讨论\]?)/g, '').replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
+      }
+
       const activeCache = window.__yktProgressCache;
       if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
         const navBoxes = queryAllDocs('.nav-item-leaf-box').filter(isVisible);
         const list = activeCache.list;
         for (let i = 0; i < navBoxes.length; i += 1) {
           const box = navBoxes[i];
-          const boxText = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-          let matched = list[i];
-          if (!matched || (matched.name && !boxText.includes(matched.name.slice(0, 6)))) {
-            matched = list.find((it) => it.name && boxText.includes(it.name));
+          const boxText = (box.textContent || '').replace(/\s+/g, ' ').trim();
+          const normBox = normalizeStr(boxText);
+          let matched = null;
+          if (list[i]) {
+            const normList = normalizeStr(list[i].name);
+            if (normBox && normList && (normBox.includes(normList.slice(0, 6)) || normList.includes(normBox.slice(0, 6)))) {
+              matched = list[i];
+            }
+          }
+          if (!matched) {
+            matched = list.find((it) => {
+              const n = normalizeStr(it.name);
+              return n && normBox && (normBox.includes(n.slice(0, 6)) || n.includes(normBox.slice(0, 6)));
+            });
           }
           if (matched) {
             const pct = Math.min(100, Math.max(0, Math.round((matched.progress || 0) * 100)));
             const isDone = (matched.progress || 0) >= 0.995;
             box.setAttribute('data-ykt-leaf-id', matched.id);
             box.setAttribute('data-ykt-leaf-pct', String(pct));
-            box.setAttribute('data-ykt-leaf-done', isDone ? 'true' : 'false');
+            if (isDone) box.setAttribute('data-ykt-leaf-done', 'true');
           }
         }
       }
@@ -1647,7 +1716,7 @@ function buildDomProbeScript(): string {
       const lastSvg = svgs[svgs.length - 1];
       const svgRect = lastSvg.getBoundingClientRect();
       if (svgs.length >= 2 || (boxRect.width > 60 && svgRect.left > boxRect.left + boxRect.width * 0.55)) {
-        return (lastSvg.innerHTML || '').replace(/\\s+/g, ' ').trim();
+        return (lastSvg.innerHTML || '').replace(/\s+/g, ' ').trim();
       }
       return '';
     }
@@ -1656,17 +1725,25 @@ function buildDomProbeScript(): string {
       if (!url.includes('/ai-workspace/lms-graph/')) return false;
       const cache = window.__yktProgressCache;
       if (aiCurrentLeafId && cache?.byId?.[aiCurrentLeafId]) {
-        return (cache.byId[aiCurrentLeafId].progress || 0) >= 0.995;
+        if ((cache.byId[aiCurrentLeafId].progress || 0) >= 0.995) return true;
       }
+      try {
+        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
+          if (aiCurrentLeafId && completedStorage.includes(aiCurrentLeafId)) return true;
+          if (completedStorage.includes(url)) return true;
+        }
+      } catch {}
       if (activeLeafBox) {
         const attrDone = activeLeafBox.getAttribute('data-ykt-leaf-done');
         if (attrDone === 'true') return true;
-        if (attrDone === 'false') return false;
+        const pct = activeLeafBox.getAttribute('data-ykt-leaf-pct');
+        if (pct !== null && Number(pct) >= 99) return true;
       }
       const candidates = document.querySelectorAll('span, div, p, em, i, b, strong');
       for (const el of candidates) {
         if (!el || el.children.length > 2) continue;
-        const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
         if (!/^(已完成|已提交|已读|100%)$/.test(t)) continue;
         if (!isVisible(el)) continue;
         const r = el.getBoundingClientRect();
@@ -1689,10 +1766,35 @@ function buildDomProbeScript(): string {
       if (!box) return false;
       const attrDone = box.getAttribute('data-ykt-leaf-done');
       if (attrDone === 'true') return true;
-      if (attrDone === 'false') return false;
-      const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
+      const pct = box.getAttribute('data-ykt-leaf-pct');
+      if (pct !== null && Number(pct) >= 99) return true;
+
+      const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
       if (/已完成|已读|已提交|100%/.test(t)) return true;
-      if (/\\b(is-finished|finished|completed|is-completed|done)\\b/i.test(box.innerHTML || '')) return true;
+
+      const html = (box.innerHTML || '').toLowerCase();
+      const uses = Array.from(box.querySelectorAll('use'));
+      for (const u of uses) {
+        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
+        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+          return true;
+        }
+      }
+
+      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\bdone\b|el-icon-check|is-success/i.test(html)) {
+        return true;
+      }
+
+      try {
+        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
+          const leafId = box.getAttribute('data-ykt-leaf-id');
+          if (leafId && completedStorage.includes(leafId)) return true;
+          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '').toLowerCase();
+          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
+        }
+      } catch {}
+
       const sig = getRightSidebarIconSig(box);
       if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
         return true;
@@ -3209,15 +3311,69 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
 function buildAdvanceToNextUnitOrBackScript(
   config: CourseBrushConfig,
   processedKeys: readonly string[],
+  completedKeys: readonly string[] = [],
 ): string {
   return `(() => {
     const config = ${JSON.stringify(config)};
     const processed = new Set(${JSON.stringify(processedKeys)});
+    const completedCache = new Set(${JSON.stringify(completedKeys)});
     const docs = [document];
     for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
       try {
         if (ifr.contentDocument && ifr.contentDocument.body) docs.push(ifr.contentDocument);
       } catch {}
+    }
+
+    function getCombinedItemSig(el) {
+      if (!el) return { html: '', text: '', hrefs: [] };
+      const html = (el.innerHTML || '').toLowerCase();
+      const text = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const hrefs = [];
+      try {
+        const uses = el.querySelectorAll('use');
+        for (const u of uses) {
+          const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
+          if (h) hrefs.push(h);
+        }
+      } catch {}
+      const combined = html + ' ' + hrefs.join(' ') + ' ' + text;
+      return { html, text, hrefs, combined };
+    }
+
+    function isVideoItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-shipin') || combined.includes('shipin') || combined.includes('video') || combined.includes('icon-video')) return true;
+      if (/^(?:\\[?视频\\]?|\\[?音频\\]?|video|audio)/i.test(text) || /视频|音频/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/视频|音频|video|audio/.test(tagText)) return true;
+      return false;
+    }
+
+    function isDiscussItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-taolun') || combined.includes('icon-tuwen') || combined.includes('taolun') || combined.includes('discuss') || combined.includes('forum')) return true;
+      if (/^(?:\\[?讨论\\]?|\\[?图文\\]?|discuss|forum)/i.test(text) || /讨论|图文/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/讨论|图文|discuss|forum/.test(tagText)) return true;
+      return false;
+    }
+
+    function isHomeworkItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-zuoye') || combined.includes('zuoye') || combined.includes('homework') || combined.includes('quiz') || combined.includes('exam') || combined.includes('ceyan') || combined.includes('lianxi')) return true;
+      if (/^(?:\\[?作业\\]?|\\[?练习\\]?|\\[?习题\\]?|\\[?测验\\]?|\\[?测试\\]?|\\[?考试\\]?)/i.test(text) || /作业|练习|习题|测验|测试|考试/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/作业|练习|习题|测验|测试|考试/.test(tagText)) return true;
+      return false;
+    }
+
+    function isCoursewareItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-kejian') || combined.includes('kejian') || combined.includes('courseware') || combined.includes('ppt') || combined.includes('pdf') || combined.includes('doc')) return true;
+      if (/^(?:\\[?课件\\]?|\\[?文档\\]?)/i.test(text) || /课件|文档/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/课件|文档|ppt|pdf/.test(tagText)) return true;
+      return false;
     }
 
     function getRightSidebarIconSig(box) {
@@ -3237,10 +3393,34 @@ function buildAdvanceToNextUnitOrBackScript(
       if (!box) return false;
       const attrDone = box.getAttribute('data-ykt-leaf-done');
       if (attrDone === 'true') return true;
-      if (attrDone === 'false') return false;
+      const pct = box.getAttribute('data-ykt-leaf-pct');
+      if (pct !== null && Number(pct) >= 99) return true;
+
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
       if (/已完成|已读|已提交|100%/.test(t)) return true;
-      if (/\\b(is-finished|finished|completed|is-completed|done)\\b/i.test(box.innerHTML || '')) return true;
+
+      const { html, hrefs } = getCombinedItemSig(box);
+      for (const h of hrefs) {
+        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+          return true;
+        }
+      }
+      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\\bdone\\b|el-icon-check|is-success/i.test(html)) {
+        return true;
+      }
+
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId && completedCache.has(leafId)) return true;
+
+      try {
+        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
+          if (leafId && completedStorage.includes(leafId)) return true;
+          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5]/g, '').toLowerCase();
+          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
+        }
+      } catch {}
+
       const sig = getRightSidebarIconSig(box);
       if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
         return true;
@@ -3272,19 +3452,35 @@ function buildAdvanceToNextUnitOrBackScript(
           scanOrder.push(i);
         }
 
+        // Pass 1: Prioritize next unfinished video in course
+        if (config.enableVideo) {
+          for (const i of scanOrder) {
+            const item = navItems[i];
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text || isAiBoxDone(item)) continue;
+            if (!isVideoItem(item)) continue;
+            const key = 'ai-nav-' + i + '-' + text.slice(0, 24);
+            const pctAttr = item.getAttribute('data-ykt-leaf-pct');
+            const pctLabel = pctAttr !== null ? ' (当前进度 ' + pctAttr + '%)' : '';
+            item.scrollIntoView({ behavior: 'instant', block: 'center' });
+            const clickTarget = item.querySelector('.leaf-item') || item.firstElementChild || item;
+            if (clickTarget && typeof clickTarget.click === 'function') {
+              clickTarget.click();
+              return { advanced: true, key, message: '切换到下一未完成视频：' + text.slice(0, 28) + pctLabel };
+            }
+          }
+        }
+
+        // Pass 2: Remaining enabled tasks (homework, courseware, discussion)
         for (const i of scanOrder) {
           const item = navItems[i];
           const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
           if (!text || isAiBoxDone(item)) continue;
           const key = 'ai-nav-' + i + '-' + text.slice(0, 24);
-          const isVideo = /^视频|^音频/.test(text);
-          const isDiscuss = /^讨论|^图文/.test(text);
-          const isHomework = /^作业|^练习|^习题|^测验|^测试/.test(text);
-          const isCourseware = /^课件|^文档/.test(text);
-
-          // For non-video items or items without server progress tracking, skip if already processed in this session
-          const hasServerIncompleteFlag = item.getAttribute('data-ykt-leaf-done') === 'false';
-          if (processed.has(key) && !(isVideo && hasServerIncompleteFlag)) continue;
+          const isVideo = isVideoItem(item);
+          const isDiscuss = isDiscussItem(item);
+          const isHomework = isHomeworkItem(item);
+          const isCourseware = isCoursewareItem(item);
 
           if (
             (isVideo && !config.enableVideo) ||
@@ -3293,6 +3489,16 @@ function buildAdvanceToNextUnitOrBackScript(
             (isCourseware && !config.enableCourseware)
           ) {
             continue;
+          }
+
+          if (isDiscuss) {
+            const leafId = item.getAttribute('data-ykt-leaf-id');
+            let alreadyCommented = isAiBoxDone(item);
+            try {
+              const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+              if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
+            } catch {}
+            if (alreadyCommented) continue;
           }
 
           const pctAttr = item.getAttribute('data-ykt-leaf-pct');
@@ -3314,9 +3520,11 @@ function buildAdvanceToNextUnitOrBackScript(
 
 export function buildDetectAndJumpToFirstIncompleteScript(
   config: CourseBrushConfig,
+  completedKeys: readonly string[] = [],
 ): string {
   return `(async () => {
     const config = ${JSON.stringify(config)};
+    const completedCache = new Set(${JSON.stringify(completedKeys)});
     const docs = [document];
     for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
       try {
@@ -3328,6 +3536,58 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       if (!el || el.nodeType !== 1) return false;
       const r = el.getBoundingClientRect();
       return r.width > 4 && r.height > 4;
+    }
+
+    function getCombinedItemSig(el) {
+      if (!el) return { html: '', text: '', hrefs: [] };
+      const html = (el.innerHTML || '').toLowerCase();
+      const text = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+      const hrefs = [];
+      try {
+        const uses = el.querySelectorAll('use');
+        for (const u of uses) {
+          const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
+          if (h) hrefs.push(h);
+        }
+      } catch {}
+      const combined = html + ' ' + hrefs.join(' ') + ' ' + text;
+      return { html, text, hrefs, combined };
+    }
+
+    function isVideoItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-shipin') || combined.includes('shipin') || combined.includes('video') || combined.includes('icon-video')) return true;
+      if (/^(?:\\[?视频\\]?|\\[?音频\\]?|video|audio)/i.test(text) || /视频|音频/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/视频|音频|video|audio/.test(tagText)) return true;
+      return false;
+    }
+
+    function isDiscussItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-taolun') || combined.includes('icon-tuwen') || combined.includes('taolun') || combined.includes('discuss') || combined.includes('forum')) return true;
+      if (/^(?:\\[?讨论\\]?|\\[?图文\\]?|discuss|forum)/i.test(text) || /讨论|图文/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/讨论|图文|discuss|forum/.test(tagText)) return true;
+      return false;
+    }
+
+    function isHomeworkItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-zuoye') || combined.includes('zuoye') || combined.includes('homework') || combined.includes('quiz') || combined.includes('exam') || combined.includes('ceyan') || combined.includes('lianxi')) return true;
+      if (/^(?:\\[?作业\\]?|\\[?练习\\]?|\\[?习题\\]?|\\[?测验\\]?|\\[?测试\\]?|\\[?考试\\]?)/i.test(text) || /作业|练习|习题|测验|测试|考试/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/作业|练习|习题|测验|测试|考试/.test(tagText)) return true;
+      return false;
+    }
+
+    function isCoursewareItem(el) {
+      const { combined, text } = getCombinedItemSig(el);
+      if (combined.includes('icon-kejian') || combined.includes('kejian') || combined.includes('courseware') || combined.includes('ppt') || combined.includes('pdf') || combined.includes('doc')) return true;
+      if (/^(?:\\[?课件\\]?|\\[?文档\\]?)/i.test(text) || /课件|文档/.test(text.slice(0, 8))) return true;
+      const tagText = (el.querySelector?.('.tag, .leaf-tag, [class*="tag"]')?.textContent || '').trim().toLowerCase();
+      if (/课件|文档|ppt|pdf/.test(tagText)) return true;
+      return false;
     }
 
     function getRightSidebarIconSig(box) {
@@ -3347,10 +3607,34 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       if (!box) return false;
       const attrDone = box.getAttribute('data-ykt-leaf-done');
       if (attrDone === 'true') return true;
-      if (attrDone === 'false') return false;
+      const pct = box.getAttribute('data-ykt-leaf-pct');
+      if (pct !== null && Number(pct) >= 99) return true;
+
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
       if (/已完成|已读|已提交|100%/.test(t)) return true;
-      if (/\\b(is-finished|finished|completed|is-completed|done)\\b/i.test(box.innerHTML || '')) return true;
+
+      const { html, hrefs } = getCombinedItemSig(box);
+      for (const h of hrefs) {
+        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+          return true;
+        }
+      }
+      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\\bdone\\b|el-icon-check|is-success/i.test(html)) {
+        return true;
+      }
+
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId && completedCache.has(leafId)) return true;
+
+      try {
+        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
+          if (leafId && completedStorage.includes(leafId)) return true;
+          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5]/g, '').toLowerCase();
+          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
+        }
+      } catch {}
+
       const sig = getRightSidebarIconSig(box);
       if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
         return true;
@@ -3363,6 +3647,10 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       const rawBoxes = Array.from(doc.querySelectorAll('.nav-item-leaf-box'));
       const navItems = rawBoxes.length > 0 ? rawBoxes : Array.from(doc.querySelectorAll('.leaf-item'));
       if (navItems.length > 0) {
+        function normalizeStr(s) {
+          return String(s || '').toLowerCase().replace(/^(?:\[?视频\]?|\[?音频\]?|\[?课件\]?|\[?作业\]?|\[?讨论\]?)/g, '').replace(/[^a-z0-9\\u4e00-\\u9fa5]/g, '');
+        }
+
         const activeCache = window.__yktProgressCache;
         if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
           const list = activeCache.list;
@@ -3370,16 +3658,26 @@ export function buildDetectAndJumpToFirstIncompleteScript(
             const box = navItems[i];
             if (!box.hasAttribute('data-ykt-leaf-done')) {
               const boxText = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-              let matched = list[i];
-              if (!matched || (matched.name && !boxText.includes(matched.name.slice(0, 6)))) {
-                matched = list.find((it) => it.name && boxText.includes(it.name));
+              const normBox = normalizeStr(boxText);
+              let matched = null;
+              if (list[i]) {
+                const normList = normalizeStr(list[i].name);
+                if (normBox && normList && (normBox.includes(normList.slice(0, 6)) || normList.includes(normBox.slice(0, 6)))) {
+                  matched = list[i];
+                }
+              }
+              if (!matched) {
+                matched = list.find((it) => {
+                  const n = normalizeStr(it.name);
+                  return n && normBox && (normBox.includes(n.slice(0, 6)) || n.includes(normBox.slice(0, 6)));
+                });
               }
               if (matched) {
                 const pct = Math.min(100, Math.max(0, Math.round((matched.progress || 0) * 100)));
                 const isDone = (matched.progress || 0) >= 0.995;
                 box.setAttribute('data-ykt-leaf-id', matched.id);
                 box.setAttribute('data-ykt-leaf-pct', String(pct));
-                box.setAttribute('data-ykt-leaf-done', isDone ? 'true' : 'false');
+                if (isDone) box.setAttribute('data-ykt-leaf-done', 'true');
               }
             }
           }
@@ -3401,21 +3699,43 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         let firstIncompleteItem = null;
 
         // Pass 1: Prioritize core learning materials with progress tracking (video, homework, courseware)
-        for (let i = 0; i < navItems.length; i += 1) {
-          const item = navItems[i];
-          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-          if (!text) continue;
+        // 1a. Videos first:
+        if (config.enableVideo) {
+          for (let i = 0; i < navItems.length; i += 1) {
+            const item = navItems[i];
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            if (isVideoItem(item) && !isAiBoxDone(item)) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = item;
+              break;
+            }
+          }
+        }
 
-          const isVideo = /^视频|^音频/.test(text) || Boolean(item.querySelector('.tag use[href*="shipin"]'));
-          const isHomework = /^作业|^练习|^习题|^测验|^测试|^考试/.test(text) || Boolean(item.querySelector('.tag use[href*="zuoye"]'));
-          const isCourseware = /^课件|^文档/.test(text) || Boolean(item.querySelector('.tag use[href*="kejian"]'));
+        // 1b. Homework next:
+        if (firstIncompleteIdx === -1 && config.enableHomework) {
+          for (let i = 0; i < navItems.length; i += 1) {
+            const item = navItems[i];
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            if (isHomeworkItem(item) && !isAiBoxDone(item)) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = item;
+              break;
+            }
+          }
+        }
 
-          if (
-            (isVideo && config.enableVideo) ||
-            (isHomework && config.enableHomework) ||
-            (isCourseware && config.enableCourseware)
-          ) {
-            if (!isAiBoxDone(item)) {
+        // 1c. Courseware next:
+        if (firstIncompleteIdx === -1 && config.enableCourseware) {
+          for (let i = 0; i < navItems.length; i += 1) {
+            const item = navItems[i];
+            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            if (isCoursewareItem(item) && !isAiBoxDone(item)) {
               firstIncompleteIdx = i;
               firstIncompleteTitle = text;
               firstIncompleteItem = item;
@@ -3430,8 +3750,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
             const item = navItems[i];
             const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
             if (!text) continue;
-            const isDiscuss = /^讨论|^图文/.test(text) || Boolean(item.querySelector('.tag use[href*="taolun"], .tag use[href*="tuwen"]'));
-            if (isDiscuss) {
+            if (isDiscussItem(item)) {
               const leafId = item.getAttribute('data-ykt-leaf-id');
               let alreadyCommented = isAiBoxDone(item);
               try {
@@ -3492,31 +3811,66 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         let firstIncompleteTitle = '';
         let firstIncompleteItem = null;
 
-        // Pass 1: Prioritize core materials (video, homework, courseware)
-        for (let i = 0; i < leaves.length; i += 1) {
-          const leaf = leaves[i];
+        function isLeafDone(leaf) {
           const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
           if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
-            continue;
+            return true;
           }
           const useEl = leaf.querySelector('i svg use, i use');
-          const iconCls = leaf.querySelector('i')?.className || '';
-          const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls;
-          const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+          const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '').toLowerCase();
+          if (href.includes('wancheng') || href.includes('finish') || href.includes('gou') || href.includes('check')) return true;
+          return false;
+        }
 
-          const isVideo = href.includes('shipin');
-          const isHomework = href.includes('zuoye');
-          const isCourseware = href.includes('tuwen') || href.includes('kejian');
+        // Pass 1: Prioritize core materials (video first, then homework, then courseware)
+        if (config.enableVideo) {
+          for (let i = 0; i < leaves.length; i += 1) {
+            const leaf = leaves[i];
+            if (isLeafDone(leaf)) continue;
+            const useEl = leaf.querySelector('i svg use, i use');
+            const iconCls = leaf.querySelector('i')?.className || '';
+            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
+            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+            if (href.includes('shipin') || href.includes('video')) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = leaf;
+              break;
+            }
+          }
+        }
 
-          if (
-            (isVideo && config.enableVideo) ||
-            (isHomework && config.enableHomework) ||
-            (isCourseware && config.enableCourseware)
-          ) {
-            firstIncompleteIdx = i;
-            firstIncompleteTitle = text;
-            firstIncompleteItem = leaf;
-            break;
+        if (firstIncompleteIdx === -1 && config.enableHomework) {
+          for (let i = 0; i < leaves.length; i += 1) {
+            const leaf = leaves[i];
+            if (isLeafDone(leaf)) continue;
+            const useEl = leaf.querySelector('i svg use, i use');
+            const iconCls = leaf.querySelector('i')?.className || '';
+            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
+            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+            if (href.includes('zuoye') || href.includes('homework')) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = leaf;
+              break;
+            }
+          }
+        }
+
+        if (firstIncompleteIdx === -1 && config.enableCourseware) {
+          for (let i = 0; i < leaves.length; i += 1) {
+            const leaf = leaves[i];
+            if (isLeafDone(leaf)) continue;
+            const useEl = leaf.querySelector('i svg use, i use');
+            const iconCls = leaf.querySelector('i')?.className || '';
+            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
+            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+            if (href.includes('tuwen') || href.includes('kejian') || href.includes('courseware')) {
+              firstIncompleteIdx = i;
+              firstIncompleteTitle = text;
+              firstIncompleteItem = leaf;
+              break;
+            }
           }
         }
 
@@ -3524,16 +3878,12 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         if (firstIncompleteIdx === -1 && config.enableDiscussion) {
           for (let i = 0; i < leaves.length; i += 1) {
             const leaf = leaves[i];
-            const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
-            if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
-              continue;
-            }
+            if (isLeafDone(leaf)) continue;
             const useEl = leaf.querySelector('i svg use, i use');
             const iconCls = leaf.querySelector('i')?.className || '';
-            const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls;
+            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
             const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
-
-            if (href.includes('taolun')) {
+            if (href.includes('taolun') || href.includes('discuss')) {
               firstIncompleteIdx = i;
               firstIncompleteTitle = text;
               firstIncompleteItem = leaf;

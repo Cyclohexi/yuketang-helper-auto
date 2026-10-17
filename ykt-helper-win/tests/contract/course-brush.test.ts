@@ -528,5 +528,29 @@ describe('CourseBrushController', () => {
     expect(speedLog).toBeDefined();
     expect(speedLog?.level).toBe('success');
   });
+
+  it('buildDetectAndJumpToFirstIncompleteScript accurately detects SVG shipin icons, completion checkmarks, and skips discussions to land directly on the first incomplete video', () => {
+    const script = buildDetectAndJumpToFirstIncompleteScript(
+      {
+        enableVideo: true,
+        enableCourseware: true,
+        enableDiscussion: true,
+        enableHomework: true,
+        playbackRate: 2,
+        muteAudio: true,
+        autoSubmitHomework: true,
+      },
+      ['leaf-999'],
+    );
+
+    // Verify key robust identifiers
+    expect(script).toContain('icon-shipin');
+    expect(script).toContain('icon-wancheng');
+    expect(script).toContain('xlink:href');
+    expect(script).toContain('__ykt_completed_units');
+    expect(script).toContain('leaf-999');
+    expect(script).toContain('Pass 1: Prioritize core learning materials');
+    expect(script).toContain('Pass 2: Fallback to discussion if enabled');
+  });
 });
 
