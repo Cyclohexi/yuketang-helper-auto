@@ -1004,21 +1004,48 @@ export class CourseBrushController {
             return m ? Number(m[1]) : NaN;
           }
 
-          for (const { doc, frameEl } of docs) {
-            const media = doc.querySelector('video');
+          function lockPlaybackRate(media, rate) {
+            if (!media) return;
+            const win = media.ownerDocument.defaultView || window;
+            const proto = win.HTMLMediaElement ? win.HTMLMediaElement.prototype : null;
+            const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'playbackRate') : null;
+            if (desc && desc.set) {
+              desc.set.call(media, rate);
+              media.defaultPlaybackRate = rate;
+              if (!media.__yktRateHooked) {
+                media.__yktDesiredRate = rate;
+                media.__yktRateHooked = true;
+                Object.defineProperty(media, 'playbackRate', {
+                  configurable: true,
+                  enumerable: true,
+                  get() {
+                    return media.__yktDesiredRate || rate;
+                  },
+                  set(v) {
+                    const t = media.__yktDesiredRate || rate;
+                    desc.set.call(media, t);
+                  },
+                });
+              } else {
+                media.__yktDesiredRate = rate;
+              }
+            } else {
+              media.defaultPlaybackRate = rate;
+              media.playbackRate = rate;
+            }
+          }
+
+          for (const { doc } of docs) {
+            const media = doc.querySelector('video, audio');
             if (!media) continue;
 
             const win = doc.defaultView || window;
             const speedBtn = doc.querySelector('xt-speedbutton');
             const speedValEl = doc.querySelector('xt-speedvalue');
             const speedValText = (speedValEl?.textContent || '').replace(/\\s+/g, '').toUpperCase();
-            const uiRate = parseRate(speedValText);
 
-            // 1. Direct rate enforcement on media element
-            try {
-              media.defaultPlaybackRate = targetRate;
-              media.playbackRate = targetRate;
-            } catch {}
+            // 1. Permanently lock native playback rate on media element
+            lockPlaybackRate(media, targetRate);
 
             if (!speedBtn) {
               return {
@@ -1031,8 +1058,8 @@ export class CourseBrushController {
             }
 
             // 2. Dispatch hover on speed button to wake up list
-            const enterEv = new win.MouseEvent('mouseenter', { bubbles: true, cancelable: true });
-            const overEv = new win.MouseEvent('mouseover', { bubbles: true, cancelable: true });
+            const enterEv = new win.MouseEvent('mouseenter', { bubbles: true, cancelable: true, composed: true });
+            const overEv = new win.MouseEvent('mouseover', { bubbles: true, cancelable: true, composed: true });
             speedBtn.dispatchEvent(enterEv);
             speedBtn.dispatchEvent(overEv);
 
@@ -1041,9 +1068,7 @@ export class CourseBrushController {
             let clickedText = '';
 
             if (list) {
-              const items = Array.from(list.querySelectorAll('[data-speed], xt-button, li')).filter((el) => {
-                return !Array.from(el.children).some((c) => c.matches && c.matches('[data-speed], xt-button, li'));
-              });
+              const items = Array.from(list.querySelectorAll('[data-speed], xt-button, li'));
 
               let target = items.find((el) => {
                 const ds = Number(el.getAttribute('data-speed'));
@@ -1053,18 +1078,29 @@ export class CourseBrushController {
                 return Math.abs(parseRate(el.textContent) - targetRate) < 0.01;
               });
 
-              if (!target && items.length > 0) {
-                target = items[0];
+              const fastRewriteItem =
+                doc.querySelector('xt-speedlist xt-button') ||
+                list.firstElementChild?.firstElementChild ||
+                items[0];
+
+              if (!target && fastRewriteItem) {
+                target = fastRewriteItem;
                 target.setAttribute('data-speed', String(targetRate));
                 target.setAttribute('keyt', targetRate.toFixed(2));
                 target.textContent = targetRate.toFixed(2) + 'X';
               }
 
               if (target) {
-                target.dispatchEvent(new win.MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
-                target.dispatchEvent(new win.MouseEvent('mouseover', { bubbles: true, cancelable: true }));
-                target.dispatchEvent(new win.MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                target.dispatchEvent(new win.MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                const evOpts = { bubbles: true, cancelable: true, composed: true };
+                try {
+                  target.dispatchEvent(new win.PointerEvent('pointerdown', evOpts));
+                } catch {}
+                target.dispatchEvent(new win.MouseEvent('mousedown', evOpts));
+                try {
+                  target.dispatchEvent(new win.PointerEvent('pointerup', evOpts));
+                } catch {}
+                target.dispatchEvent(new win.MouseEvent('mouseup', evOpts));
+                target.dispatchEvent(new win.MouseEvent('click', evOpts));
                 if (typeof target.click === 'function') {
                   target.click();
                 }
@@ -1073,18 +1109,15 @@ export class CourseBrushController {
               }
             }
 
-            speedBtn.dispatchEvent(new win.MouseEvent('mouseleave', { bubbles: true, cancelable: true }));
+            speedBtn.dispatchEvent(new win.MouseEvent('mouseleave', { bubbles: true, cancelable: true, composed: true }));
 
             // 3. Synchronize UI label
             if (speedValEl) {
               speedValEl.textContent = targetRate.toFixed(2) + 'X';
             }
 
-            // Ensure media.playbackRate is preserved
-            try {
-              media.defaultPlaybackRate = targetRate;
-              media.playbackRate = targetRate;
-            } catch {}
+            // Ensure media is still locked at targetRate
+            lockPlaybackRate(media, targetRate);
 
             return {
               found: true,
@@ -2619,15 +2652,37 @@ function buildEnsureMediaAndAntiCheckScript(config: CourseBrushConfig): string {
               media.setAttribute('muted', 'muted');
             }
 
-            if (Math.abs((media.playbackRate || 1) - curRate) > 0.04) {
-              try {
+            try {
+              const proto = win.HTMLMediaElement ? win.HTMLMediaElement.prototype : null;
+              const desc = proto ? Object.getOwnPropertyDescriptor(proto, 'playbackRate') : null;
+              if (desc && desc.set) {
+                desc.set.call(media, curRate);
+                media.defaultPlaybackRate = curRate;
+                if (!media.__yktRateHooked) {
+                  media.__yktDesiredRate = curRate;
+                  media.__yktRateHooked = true;
+                  Object.defineProperty(media, 'playbackRate', {
+                    configurable: true,
+                    enumerable: true,
+                    get() {
+                      return media.__yktDesiredRate || curRate;
+                    },
+                    set(v) {
+                      const t = media.__yktDesiredRate || curRate;
+                      desc.set.call(media, t);
+                    },
+                  });
+                } else {
+                  media.__yktDesiredRate = curRate;
+                }
+              } else {
                 media.defaultPlaybackRate = curRate;
                 media.playbackRate = curRate;
-              } catch {}
-              const speedVal = doc.querySelector('xt-speedvalue');
-              if (speedVal && (!speedVal.textContent || !speedVal.textContent.includes(String(curRate)))) {
-                speedVal.textContent = curRate.toFixed(2) + 'X';
               }
+            } catch {}
+            const speedVal = doc.querySelector('xt-speedvalue');
+            if (speedVal && (!speedVal.textContent || !speedVal.textContent.includes(String(curRate)))) {
+              speedVal.textContent = curRate.toFixed(2) + 'X';
             }
 
             const nearEnd =
