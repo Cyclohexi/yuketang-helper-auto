@@ -58,26 +58,6 @@ export class CourseBrushController {
         this.attachWebContentsHooks(contents);
       }) ?? null;
 
-    try {
-      if (app?.isReady?.()) {
-        const cacheFile = join(app.getPath('userData'), 'course-brush-cache.json');
-        readFile(cacheFile, 'utf8')
-          .then((data) => {
-            const arr = JSON.parse(data);
-            if (Array.isArray(arr)) {
-              for (const k of arr) {
-                if (
-                  typeof k === 'string' &&
-                  (k.startsWith('http') || /^\d{4,}$/.test(k))
-                ) {
-                  this.#completedLeafKeys.add(k);
-                }
-              }
-            }
-          })
-          .catch(() => null);
-      }
-    } catch {}
   }
 
   getState(): CourseBrushState {
@@ -174,6 +154,7 @@ export class CourseBrushController {
     this.#needFirstIncompleteAlignment = true;
     this.#lastAlignedClassroomId = '';
     this.#alignmentAttempts = 0;
+    this.#completedLeafKeys.clear();
     this.#processedDirectoryKeys.clear();
     this.#unitReloadAttempts.clear();
     this.#speedAttemptsByUrl.clear();
@@ -187,6 +168,18 @@ export class CourseBrushController {
     try {
       this.browser.webContents.setAudioMuted(Boolean(this.#config.muteAudio));
     } catch {}
+    await this.browser.webContents
+      .executeJavaScript(
+        `(() => {
+          try {
+            localStorage.removeItem('__ykt_completed_units');
+            localStorage.removeItem('__ykt_cache');
+            localStorage.removeItem('__ykt_commented_discussions');
+          } catch {}
+        })()`,
+        true,
+      )
+      .catch(() => null);
     this.log(
       'info',
       `🚀 启动 Electron 原生自动刷课（当前标签页 ${browserState.activeTabId}）`,
@@ -537,9 +530,9 @@ export class CourseBrushController {
 
         if (this.#needFirstIncompleteAlignment) {
           const alignResult = await this.alignToFirstIncompleteUnit();
-          if (alignResult.waitingForSidebar) {
+          if (alignResult.waitingForSidebar || alignResult.noSidebar) {
             this.#alignmentAttempts += 1;
-            if (this.#alignmentAttempts <= 2) {
+            if (this.#alignmentAttempts <= 5) {
               this.#currentTaskTitle = '正在检测并读取课程目录进度…';
               this.emitState();
               await this.sleep(1200);
@@ -555,20 +548,26 @@ export class CourseBrushController {
             this.#needFirstIncompleteAlignment = false;
             this.#alignmentAttempts = 0;
             this.#mediaWaitTicks = 0;
+            const targetNum = (alignResult.targetIdx ?? 0) + 1;
+            const totalNum = alignResult.total ?? '?';
+            const typeLabel = alignResult.itemType ? `[${alignResult.itemType}] ` : '';
             this.log(
               'info',
-              `🎯 自动检测到全课首个未完成任务（第 ${(alignResult.targetIdx ?? 0) + 1}/${alignResult.total ?? '?'} 节）：${alignResult.title ?? ''}，正在自动跳转从首个未完成项开刷…`,
+              `🎯 自动检测到全课首个未完成任务（第 ${targetNum}/${totalNum} 节）：${typeLabel}${alignResult.title ?? ''}，正在自动跳转从首个未完成项开刷…`,
             );
-            this.#currentTaskTitle = `正在跳转至首个未完成项：${alignResult.title ?? ''}`;
+            this.#currentTaskTitle = `正在跳转至首个未完成项：${typeLabel}${alignResult.title ?? ''}`;
             this.emitState();
             await this.sleep(2800);
             return;
           } else if (alignResult.alreadyAtTarget) {
             this.#needFirstIncompleteAlignment = false;
             this.#alignmentAttempts = 0;
+            const targetNum = (alignResult.targetIdx ?? 0) + 1;
+            const totalNum = alignResult.total ?? '?';
+            const typeLabel = alignResult.itemType ? `[${alignResult.itemType}] ` : '';
             this.log(
               'info',
-              `🎯 自动检测确认：当前正是全课首个未完成任务（第 ${(alignResult.targetIdx ?? 0) + 1}/${alignResult.total ?? '?'} 节）：${alignResult.title ?? ''}，直接开始刷课`,
+              `🎯 自动检测确认：当前正是全课首个未完成任务（第 ${targetNum}/${totalNum} 节）：${typeLabel}${alignResult.title ?? ''}，直接开始刷课`,
             );
           } else if (alignResult.allCompleted) {
             this.#needFirstIncompleteAlignment = false;
@@ -733,6 +732,7 @@ export class CourseBrushController {
     activeIdx?: number;
     total?: number;
     title?: string;
+    itemType?: string;
   }> {
     const contents = this.browser.webContents;
     if (!contents || contents.isDestroyed()) {
@@ -756,6 +756,7 @@ export class CourseBrushController {
         activeIdx?: number;
         total?: number;
         title?: string;
+        itemType?: string;
       };
       return res;
     } catch {
@@ -1255,38 +1256,6 @@ export class CourseBrushController {
 
     for (const k of keys) {
       this.#completedLeafKeys.add(k);
-    }
-
-    try {
-      if (app?.isReady?.()) {
-        const cacheFile = join(app.getPath('userData'), 'course-brush-cache.json');
-        void writeFile(
-          cacheFile,
-          JSON.stringify(Array.from(this.#completedLeafKeys)),
-          'utf8',
-        ).catch(() => null);
-      }
-    } catch {}
-
-    try {
-      const contents = this.browser.webContents;
-      if (contents && !contents.isDestroyed()) {
-        await contents
-          .executeJavaScript(
-            `(() => {
-              try {
-                const keys = ${JSON.stringify(keys)};
-                const cur = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-                const set = new Set(cur.concat(keys));
-                localStorage.setItem('__ykt_completed_units', JSON.stringify(Array.from(set)));
-              } catch {}
-            })()`,
-            true,
-          )
-          .catch(() => null);
-      }
-    } catch {
-      // Ignore transient script errors
     }
   }
 
@@ -1829,13 +1798,6 @@ ${ORDERED_PROGRESS_MAPPING_JS}
       if (aiCurrentLeafId && cache?.byId?.[aiCurrentLeafId]) {
         if ((cache.byId[aiCurrentLeafId].progress || 0) >= 0.995) return true;
       }
-      try {
-        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
-          if (aiCurrentLeafId && completedStorage.includes(aiCurrentLeafId)) return true;
-          if (completedStorage.includes(url)) return true;
-        }
-      } catch {}
       if (activeLeafBox) {
         const attrDone = activeLeafBox.getAttribute('data-ykt-leaf-done');
         if (attrDone === 'true') return true;
@@ -1846,6 +1808,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
       for (const el of candidates) {
         if (!el || el.children.length > 2) continue;
         const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/未完成|未开始|未读|未提交|未发表/.test(t)) continue;
         if (!/^(已完成|已提交|已读|100%)$/.test(t)) continue;
         if (!isVisible(el)) continue;
         const r = el.getBoundingClientRect();
@@ -1872,36 +1835,26 @@ ${ORDERED_PROGRESS_MAPPING_JS}
       }
 
       const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
       if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
-      const html = (box.innerHTML || '').toLowerCase();
       const uses = Array.from(box.querySelectorAll('use'));
       for (const u of uses) {
         const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
-        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+        if (/uncheck|not|incomplete|false/i.test(h)) continue;
+        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
           return true;
         }
-      }
-
-      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\bdone\b|el-icon-check|is-success/i.test(html)) {
-        return true;
       }
 
       const svgs = box.querySelectorAll('svg');
       for (const s of svgs) {
-        const sHtml = (s.innerHTML || '').toLowerCase();
         const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+        if (/uncheck|not/i.test(sCls)) continue;
+        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
           return true;
         }
       }
-
-      try {
-        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
-          if (leafId && completedStorage.includes(leafId)) return true;
-        }
-      } catch {}
 
       try {
         const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
@@ -2810,20 +2763,8 @@ function buildEnsureMediaAndAntiCheckScript(config: CourseBrushConfig): string {
       const mute = Boolean(${JSON.stringify(config.muteAudio)});
 
       try {
-        const rawCompleted = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-        if (Array.isArray(rawCompleted)) {
-          const sanitized = rawCompleted.filter((k) => typeof k === 'string' && (k.startsWith('http') || /^\d{4,}$/.test(k)));
-          if (sanitized.length !== rawCompleted.length) {
-            localStorage.setItem('__ykt_completed_units', JSON.stringify(sanitized));
-          }
-        }
-        const rawCommented = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-        if (Array.isArray(rawCommented)) {
-          const sanitized = rawCommented.filter((k) => typeof k === 'string' && (k.startsWith('http') || /^\d{4,}$/.test(k)));
-          if (sanitized.length !== rawCommented.length) {
-            localStorage.setItem('__ykt_commented_discussions', JSON.stringify(sanitized));
-          }
-        }
+        localStorage.removeItem('__ykt_completed_units');
+        localStorage.removeItem('__ykt_cache');
       } catch {}
 
       const docs = [document];
@@ -3019,15 +2960,18 @@ export function buildTriggerNextDirectoryItemScript(
         const headerSection = box.querySelector(':scope > section') || box.querySelector('section') || box;
         const asideText = (headerSection.querySelector('.statistics-box .aside')?.textContent || '').replace(/\\s+/g, ' ').trim();
         const headerStatHtml = (headerSection.querySelector('.statistics-box')?.innerHTML || '').toLowerCase();
-        if (
-          asideText.includes('已完成') ||
-          asideText.includes('已读') ||
-          asideText.includes('已发表') ||
-          asideText.includes('已参与') ||
-          asideText.includes('已讨论') ||
-          isFractionDone(asideText) ||
-          /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(headerStatHtml)
-        ) {
+        const isHeaderDone =
+          !/未完成|未开始|未读|未提交|未发表/.test(asideText) && (
+            asideText.includes('已完成') ||
+            asideText.includes('已读') ||
+            asideText.includes('已发表') ||
+            asideText.includes('已参与') ||
+            asideText.includes('已讨论') ||
+            isFractionDone(asideText) ||
+            (!/uncheck|incomplete|not-done/i.test(headerStatHtml) &&
+             /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(headerStatHtml))
+          );
+        if (isHeaderDone) {
           continue;
         }
 
@@ -3066,13 +3010,16 @@ export function buildTriggerNextDirectoryItemScript(
             const subAside = (sub.querySelector('.statistics-box .aside')?.textContent || '').replace(/\\s+/g, ' ').trim();
             const subStatHtml = (sub.querySelector('.statistics-box')?.innerHTML || '').toLowerCase();
             const subIsDone =
-              subAside.includes('已完成') ||
-              subAside.includes('已读') ||
-              subAside.includes('已发表') ||
-              subAside.includes('已参与') ||
-              subAside.includes('已讨论') ||
-              isFractionDone(subAside) ||
-              /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(subStatHtml);
+              !/未完成|未开始|未读|未提交|未发表/.test(subAside) && (
+                subAside.includes('已完成') ||
+                subAside.includes('已读') ||
+                subAside.includes('已发表') ||
+                subAside.includes('已参与') ||
+                subAside.includes('已讨论') ||
+                isFractionDone(subAside) ||
+                (!/uncheck|incomplete|not-done/i.test(subStatHtml) &&
+                 /icon-(?:gou|check|wancheng|finish)|class="[^"]*(?:done|finish|success)/i.test(subStatHtml))
+              );
             if (subIsDone) continue;
             const subTagText = (sub.querySelector('.tag')?.textContent || '').trim();
             const subUse = sub.querySelector('.tag use') || sub.querySelector('.tag svg use');
@@ -3565,39 +3512,31 @@ ${ORDERED_PROGRESS_MAPPING_JS}
 
       const leafId = box.getAttribute('data-ykt-leaf-id');
       if (leafId) {
-        if (completedCache.has(leafId)) return true;
         const cacheProg = window.__yktProgressCache?.byId?.[leafId];
         if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
       }
 
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
       if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
-      const { html, hrefs } = getCombinedItemSig(box);
-      for (const h of hrefs) {
-        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+      const uses = Array.from(box.querySelectorAll('use'));
+      for (const u of uses) {
+        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
+        if (/uncheck|not|incomplete|false/i.test(h)) continue;
+        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
           return true;
         }
-      }
-      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\\bdone\\b|el-icon-check|is-success/i.test(html)) {
-        return true;
       }
 
       const svgs = box.querySelectorAll('svg');
       for (const s of svgs) {
-        const sHtml = (s.innerHTML || '').toLowerCase();
         const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+        if (/uncheck|not/i.test(sCls)) continue;
+        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
           return true;
         }
       }
-
-      try {
-        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
-          if (leafId && completedStorage.includes(leafId)) return true;
-        }
-      } catch {}
 
       try {
         const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
@@ -3768,39 +3707,31 @@ ${ORDERED_PROGRESS_MAPPING_JS}
 
       const leafId = box.getAttribute('data-ykt-leaf-id');
       if (leafId) {
-        if (completedCache.has(leafId)) return true;
         const cacheProg = window.__yktProgressCache?.byId?.[leafId];
         if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
       }
 
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
+      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
       if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
-      const { html, hrefs } = getCombinedItemSig(box);
-      for (const h of hrefs) {
-        if (h.includes('wancheng') || h.includes('finish') || h.includes('gou') || h.includes('check') || h.includes('complete')) {
+      const uses = Array.from(box.querySelectorAll('use'));
+      for (const u of uses) {
+        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
+        if (/uncheck|not|incomplete|false/i.test(h)) continue;
+        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
           return true;
         }
-      }
-      if (/icon-wancheng|icon-finish|icon-gou|icon-check|is-finished|finished|completed|is-completed|\\bdone\\b|el-icon-check|is-success/i.test(html)) {
-        return true;
       }
 
       const svgs = box.querySelectorAll('svg');
       for (const s of svgs) {
-        const sHtml = (s.innerHTML || '').toLowerCase();
         const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+        if (/uncheck|not/i.test(sCls)) continue;
+        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
           return true;
         }
       }
-
-      try {
-        const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
-        if (Array.isArray(completedStorage) && completedStorage.length > 0) {
-          if (leafId && completedStorage.includes(leafId)) return true;
-        }
-      } catch {}
 
       try {
         const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
@@ -3879,6 +3810,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
 
         let firstIncompleteIdx = -1;
         let firstIncompleteTitle = '';
+        let firstIncompleteType = '';
         let firstIncompleteItem = null;
 
         // Sequential chapter progression: first unfinished enabled unit in natural catalog order
@@ -3911,6 +3843,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           }
           firstIncompleteIdx = i;
           firstIncompleteTitle = text;
+          firstIncompleteType = isVideo ? '视频' : isDiscuss ? '讨论' : isHomework ? '作业' : isCourseware ? '课件' : '任务';
           firstIncompleteItem = item;
           break;
         }
@@ -3931,6 +3864,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
             targetIdx: firstIncompleteIdx,
             total: navItems.length,
             title: fullTitle,
+            itemType: firstIncompleteType,
           };
         }
 
@@ -3945,6 +3879,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
             targetIdx: firstIncompleteIdx,
             total: navItems.length,
             title: fullTitle,
+            itemType: firstIncompleteType,
           };
         }
       }
@@ -3957,16 +3892,19 @@ ${ORDERED_PROGRESS_MAPPING_JS}
         let activeIdx = leaves.findIndex((el) => /active|current|is-active|selected/i.test(el.className || ''));
         let firstIncompleteIdx = -1;
         let firstIncompleteTitle = '';
+        let firstIncompleteType = '';
         let firstIncompleteItem = null;
 
         function isLeafDone(leaf) {
           const pText = (leaf.querySelector('.progress-time')?.textContent || '').trim();
+          if (/未完成|未开始|未读|未提交|未发表/.test(pText)) return false;
           if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
             return true;
           }
           const useEl = leaf.querySelector('i svg use, i use');
           const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '').toLowerCase();
-          if (href.includes('wancheng') || href.includes('finish') || href.includes('gou') || href.includes('check')) return true;
+          if (/uncheck|not|incomplete|false/i.test(href)) return false;
+          if (href.includes('wancheng') || href.includes('finish') || href.includes('gou') || href.includes('icon-check') || href.includes('checked')) return true;
           return false;
         }
 
@@ -3990,6 +3928,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           ) {
             firstIncompleteIdx = i;
             firstIncompleteTitle = text;
+            firstIncompleteType = isVideo ? '视频' : isHomework ? '作业' : isCourseware ? '课件' : isDiscuss ? '讨论' : '任务';
             firstIncompleteItem = leaf;
             break;
           }
@@ -4007,6 +3946,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
             targetIdx: firstIncompleteIdx,
             total: leaves.length,
             title: firstIncompleteTitle,
+            itemType: firstIncompleteType,
           };
         }
 
@@ -4019,11 +3959,12 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           targetIdx: firstIncompleteIdx,
           total: leaves.length,
           title: firstIncompleteTitle,
+          itemType: firstIncompleteType,
         };
       }
     }
 
-    return { ready: false, noSidebar: true };
+    return { ready: false, noSidebar: true, waitingForSidebar: true };
   })()`;
 }
 

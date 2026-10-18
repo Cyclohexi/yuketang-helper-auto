@@ -550,7 +550,7 @@ describe('CourseBrushController', () => {
     expect(script).toContain('icon-shipin');
     expect(script).toContain('icon-wancheng');
     expect(script).toContain('xlink:href');
-    expect(script).toContain('__ykt_completed_units');
+    expect(script).not.toContain('__ykt_completed_units');
     expect(script).toContain('leaf-999');
     expect(script).toContain('Sequential chapter progression');
     expect(script).toContain('已发表');
