@@ -44,12 +44,11 @@
 
 ## 快速开始 (Quick Start)
 
-### 方式一：下载 Windows 一键安装程序 (推荐普通用户)
-> 💡 **无需安装 Node.js、npm 或 Git**，下载即用。
+### 方式一：下载 Windows 绿色免安装版 (推荐普通用户)
+> 💡 **无需安装 Node.js、npm 或 Git**，解压即用。
 
 前往 [Releases 页面](https://github.com/Cyclohexi/yuketang-helper-auto/releases) 下载最新发行版：
-- 📦 **一键安装包**：下载 `YuketangHelper-Setup.exe`，双击全自动安装并创建桌面快捷方式。
-- 🗂️ **绿色免安装版**：下载 `YuketangHelper-Portable.zip`，解压后双击 `雨课堂助手.exe` 直接运行。
+- 🗂️ **绿色便携免安装版**：下载 `YuketangHelper-v2.1.0-Windows-x64-Portable.zip`，解压到任意文件夹，双击 `雨课堂助手.exe` 直接运行。数据完全独立保存在本地，无需复杂安装。
 
 ### 方式二：下载源码一键启动
 如果你下载了源码压缩包或克隆了本仓库：
