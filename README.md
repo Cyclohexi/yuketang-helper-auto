@@ -24,9 +24,6 @@
     </h3>
 </html>
 
-
-[返回旧版](./README_origin.md)
-
 ## 简介
 
 > Latest Version：2.1.0-preview 20261018
@@ -83,13 +80,9 @@ npm start
 
 ![](./static/desktop/in_class.png)
 
-## 源代码
+## 源代码结构
 
-|文件夹|适用平台|状态|
-|---|---|---|
-|`ykt-helper`|Edge/Chrome 浏览器|`1.21.5` 正在更新|
-|`ykt-helper-win`|Windows/macOS 独立客户端|`2.0.0-preview`正在更新|
-|`ykt-helper-android`|Android 移动端|正在开发|
+- **`ykt-helper-win`**：Windows 桌面客户端独立工程（包含 Electron 核心进程、Vue 3 渲染端、契约测试、自动化刷课控制器与视觉 AI）。
 
 ## 功能
 
