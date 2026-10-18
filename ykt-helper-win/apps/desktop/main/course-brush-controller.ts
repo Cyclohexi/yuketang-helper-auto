@@ -804,14 +804,23 @@ export class CourseBrushController {
       };
 
       if (extraResult.action === 'waiting') {
-        this.#currentTaskTitle = extraResult.message;
-        this.log('info', `⏳ ${extraResult.message}`);
-        this.emitState();
-        await this.sleep(2000);
-        return false;
+        const discussWait = (this.#unitReloadAttempts.get(probe.url) ?? 0) + 1;
+        this.#unitReloadAttempts.set(probe.url, discussWait);
+        if (discussWait <= 3) {
+          this.#currentTaskTitle = `${extraResult.message} (${discussWait}/3)…：${probe.title}`;
+          this.log('info', `⏳ ${this.#currentTaskTitle}`);
+          this.emitState();
+          await this.sleep(1800);
+          return false;
+        }
+        this.#unitReloadAttempts.delete(probe.url);
+        this.log('warn', `⚠️ 讨论区未找到可输入评论框或已无需发言，自动跳过进入下一单元：${probe.title}`);
+        await this.markCurrentUnitCompleted(probe);
+        return true;
       }
 
       if (extraResult.action === 'done') {
+        this.#unitReloadAttempts.delete(probe.url);
         this.log('success', `✅ ${extraResult.message}`);
         await this.markCurrentUnitCompleted(probe);
         return true;
@@ -827,7 +836,7 @@ export class CourseBrushController {
       }
 
       this.#unitReloadAttempts.delete(probe.url);
-      this.log('warn', `⚠️ 讨论区未找到评论输入框或已无需发言：${probe.title}`);
+      this.log('warn', `⚠️ 讨论区未找到评论输入框或已无需发言，自动跳过进入下一单元：${probe.title}`);
       await this.markCurrentUnitCompleted(probe);
       return true;
     }
@@ -1251,11 +1260,28 @@ export class CourseBrushController {
       probe.url.match(
         /\/ai-workspace\/lms-graph\/(\d+)\/([^/?#]+)\/(\d+)/i,
       ) || probe.url.match(/node_id=(\d+)/i);
-    const leafId = m && m[3] ? m[3] : m && m[1] ? m[1] : '';
+    const leafId = m && m[3] ? m[3] : (m && !probe.url.includes('/ai-workspace/lms-graph/') && m[1] ? m[1] : '');
     if (leafId && /^\d+$/.test(leafId)) keys.push(leafId);
 
     for (const k of keys) {
       this.#completedLeafKeys.add(k);
+    }
+
+    if (leafId && /^\d+$/.test(leafId)) {
+      try {
+        await this.browser.webContents.executeJavaScript(
+          `(() => {
+            try {
+              const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+              if (!stored.includes(${JSON.stringify(leafId)})) {
+                stored.push(${JSON.stringify(leafId)});
+                localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
+              }
+            } catch {}
+          })()`,
+          true,
+        );
+      } catch {}
     }
   }
 
@@ -1603,7 +1629,7 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
       t = t.replace(/^(?:\[[^\]]+\]|【[^】]+】)\s*/, '');
       t = t.replace(/^(?:视频|音频|课件|文档|作业|练习|测验|讨论|图文)\s+/i, '');
       t = t.replace(/^(视频|音频|课件|文档|作业|练习|测验|讨论|图文)\1/i, '$1');
-      return t.replace(/[\s\-_—·:：/\\()[\]{}【】（）]/g, '').toLowerCase();
+      return t.replace(/[\s\-_—·:：/\\()[\]{}【】（）.…]/g, '').toLowerCase();
     }
     function yktApplyOrderedProgress(boxes, list) {
       if (!boxes || !list || !Array.isArray(list) || list.length === 0) return;
@@ -1635,7 +1661,13 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
         for (let j = ptr; j < list.length; j += 1) {
           const n = yktCleanTitle(list[j].name);
           if (!n) continue;
-          if (n === nb || (nb.length >= 4 && n.includes(nb)) || (n.length >= 4 && nb.includes(n))) {
+          if (
+            n === nb ||
+            (nb.length >= 4 && n.includes(nb)) ||
+            (n.length >= 4 && nb.includes(n)) ||
+            (nb.length >= 4 && n.startsWith(nb.slice(0, 6))) ||
+            (n.length >= 4 && nb.startsWith(n.slice(0, 6)))
+          ) {
             hit = j;
             break;
           }
@@ -2995,11 +3027,9 @@ export function buildTriggerNextDirectoryItemScript(
             continue;
           }
           if (subActivities.length === 0 && expandBtn && typeof expandBtn.click === 'function' && !expandText.includes('收起')) {
-            if (!pendingExpandBtn) {
-              pendingExpandBtn = expandBtn;
-              pendingExpandTitle = title;
-            }
-            continue;
+            expandBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            expandBtn.click();
+            return { status: 'expanded', key: '', title };
           }
           const allSubs = subActivities.length > 0
             ? subActivities
@@ -3371,20 +3401,38 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
               !/发表你的观点|暂无评论|还没有人发言|Shift\+Enter|全部评论|话题详情|编辑于|条评论/.test(t)
           );
 
-        const inputEl = doc.querySelector(
-          'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea'
+        let inputEl = doc.querySelector(
+          'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
         );
+        if (!inputEl) {
+          const triggerBtn = Array.from(
+            doc.querySelectorAll('button, .el-button, a, span, div, p')
+          ).find((b) => {
+            if (!b || b.children.length > 2) return false;
+            const t = (b.textContent || '').replace(/\\s+/g, '').trim();
+            return /^(参与讨论|发表观点|写评论|发表评论|我也说两句|添加评论|写回答|说点什么|发表讨论)$/.test(t) ||
+                   /说点什么|参与讨论|发表观点/.test(t.slice(0, 8));
+          });
+          if (triggerBtn && typeof triggerBtn.click === 'function') {
+            triggerBtn.click();
+            await sleep(600);
+            inputEl = doc.querySelector(
+              'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
+            );
+          }
+        }
+
         let submitBtn =
           doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn, #new_discuss button[class*="submit"], #new_discuss button[class*="post"]') ||
-          Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"]')).find((b) =>
-            /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\s+/g, '').trim())
+          Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"], span, div')).find((b) =>
+            /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\\s+/g, '').trim())
           );
 
         if (!submitBtn && inputEl) {
           const inputWrap = inputEl.parentElement?.parentElement || inputEl.parentElement;
           if (inputWrap) {
             const enterHint = Array.from(inputWrap.querySelectorAll('span, div')).find(
-              (el) => el.children.length === 0 && /Enter\s*发送/i.test(el.textContent || '')
+              (el) => el.children.length === 0 && /Enter\\s*发送/i.test(el.textContent || '')
             );
             if (enterHint && enterHint.parentElement) {
               submitBtn =
@@ -3398,6 +3446,10 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
         if (inputEl) {
           const text = firstValidComment || '坚持党的领导，坚定理想信念！';
           inputEl.focus();
+          try {
+            doc.execCommand('selectAll', false, null);
+            doc.execCommand('insertText', false, text);
+          } catch {}
           if (inputEl.tagName === 'TEXTAREA' || inputEl.tagName === 'INPUT') {
             const desc = win.HTMLTextAreaElement ? Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value') : null;
             if (desc && desc.set) desc.set.call(inputEl, text);
@@ -3405,11 +3457,11 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
             inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
             inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
           } else {
-            inputEl.innerText = text;
+            if (!inputEl.innerText || !inputEl.innerText.trim()) inputEl.innerText = text;
             inputEl.dispatchEvent(new win.InputEvent('input', { bubbles: true, data: text }));
             inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
           }
-          await sleep(450);
+          await sleep(500);
           if (submitBtn && typeof submitBtn.click === 'function') {
             submitBtn.click();
           }
@@ -3439,7 +3491,7 @@ export function buildAdvanceToNextUnitOrBackScript(
   processedKeys: readonly string[],
   completedKeys: readonly string[] = [],
 ): string {
-  return `(() => {
+  return `(async () => {
 ${ORDERED_PROGRESS_MAPPING_JS}
     const config = ${JSON.stringify(config)};
     const processed = new Set(${JSON.stringify(processedKeys)});
@@ -3512,6 +3564,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
 
       const leafId = box.getAttribute('data-ykt-leaf-id');
       if (leafId) {
+        if (completedCache.has(leafId)) return true;
         const cacheProg = window.__yktProgressCache?.byId?.[leafId];
         if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
       }
@@ -3549,17 +3602,63 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     }
 
     for (const doc of docs) {
-      // 1. Pro LMS .btn-next
-      const btnNext = doc.querySelector('.btn-next');
-      if (btnNext && typeof btnNext.click === 'function' && btnNext.offsetParent !== null) {
-        btnNext.click();
-        return { advanced: true, message: '点击「下一单元」(.btn-next)' };
+      // 1. Pro LMS .btn-next (only when not on AI Workspace)
+      if (!location.href.includes('/ai-workspace/lms-graph/')) {
+        const btnNext = doc.querySelector('.btn-next');
+        if (btnNext && typeof btnNext.click === 'function' && btnNext.offsetParent !== null) {
+          btnNext.click();
+          return { advanced: true, message: '点击「下一单元」(.btn-next)' };
+        }
       }
 
       // 2. AI Workspace sidebar (.nav-item-leaf-box)
       const rawBoxes = Array.from(doc.querySelectorAll('.nav-item-leaf-box'));
       const navItems = rawBoxes.length > 0 ? rawBoxes : Array.from(doc.querySelectorAll('.leaf-item'));
       if (navItems.length > 0) {
+        const aiMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/(\\d+)/i);
+        const aiClassroomId = aiMatch ? aiMatch[1] : '';
+        if (aiClassroomId && (!window.__yktProgressCache || window.__yktProgressCache.classroomId !== aiClassroomId)) {
+          try {
+            const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + aiClassroomId, {
+              credentials: 'include',
+            });
+            if (resp.ok) {
+              const json = await resp.json();
+              const list = [];
+              const byId = {};
+              function walkProgress(nodes) {
+                if (!Array.isArray(nodes)) return;
+                for (const node of nodes) {
+                  if (!node || typeof node !== 'object') continue;
+                  if (Array.isArray(node.section_leaf_list)) {
+                    walkProgress(node.section_leaf_list);
+                  } else if (Array.isArray(node.children)) {
+                    walkProgress(node.children);
+                  } else if (node.id !== undefined && node.progress !== undefined) {
+                    const item = {
+                      id: String(node.id),
+                      name: String(node.name || '').replace(/\\s+/g, ' ').trim(),
+                      leafType: node.leaf_type,
+                      progress: Number(node.progress || 0),
+                    };
+                    list.push(item);
+                    byId[item.id] = item;
+                  }
+                }
+              }
+              walkProgress(json?.data?.course_progress);
+              if (list.length > 0) {
+                window.__yktProgressCache = {
+                  classroomId: aiClassroomId,
+                  ts: Date.now(),
+                  list,
+                  byId,
+                };
+              }
+            }
+          } catch {}
+        }
+
         const activeCache = window.__yktProgressCache;
         if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
           yktApplyOrderedProgress(navItems, activeCache.list);
@@ -3569,12 +3668,36 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           /active|current|is-active|selected/i.test((el.className || '') + ' ' + (el.firstElementChild?.className || '')) ||
           Boolean(el.querySelector('.is-active, .active'))
         );
-        const scanOrder = [];
-        for (let i = activeIdx + 1; i < navItems.length; i += 1) {
-          scanOrder.push(i);
+        if (activeIdx === -1) {
+          const m = location.href.match(/node_id=(\\d+)/i) || location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i);
+          if (m && m[1]) {
+            activeIdx = navItems.findIndex((el) => el.getAttribute('data-ykt-leaf-id') === m[1]);
+          }
         }
-        for (let i = 0; i < activeIdx; i += 1) {
-          scanOrder.push(i);
+        if (activeIdx === -1) {
+          const currentTitle = yktCleanTitle(document.title || '');
+          if (currentTitle) {
+            activeIdx = navItems.findIndex((el) => {
+              const nb = yktCleanTitle(el.textContent);
+              return nb && (nb === currentTitle || currentTitle.includes(nb) || nb.includes(currentTitle));
+            });
+          }
+        }
+
+        const scanOrder = [];
+        if (activeIdx !== -1) {
+          // Strictly scan forward first
+          for (let i = activeIdx + 1; i < navItems.length; i += 1) {
+            scanOrder.push(i);
+          }
+          // Only as fallback if all forward items are done, check 0..activeIdx - 1
+          for (let i = 0; i < activeIdx; i += 1) {
+            scanOrder.push(i);
+          }
+        } else {
+          for (let i = 0; i < navItems.length; i += 1) {
+            scanOrder.push(i);
+          }
         }
 
         // Sequential chapter progression: advance to the next unfinished enabled unit in natural
@@ -3606,6 +3729,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
               if (leafId && stored.some((id) => String(id) === String(leafId))) alreadyCommented = true;
             } catch {}
             if (alreadyCommented) continue;
+            if (leafId && completedCache.has(leafId)) continue;
           }
 
           const pctAttr = item.getAttribute('data-ykt-leaf-pct');
@@ -3615,7 +3739,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           const clickTarget = item.querySelector('.leaf-item') || item.firstElementChild || item;
           if (clickTarget && typeof clickTarget.click === 'function') {
             clickTarget.click();
-            return { advanced: true, key, message: '切换到未完成单元：' + text.slice(0, 28) + pctLabel };
+            return { advanced: true, key, message: '切换到下一未完成单元：' + text.slice(0, 28) + pctLabel };
           }
         }
       }
