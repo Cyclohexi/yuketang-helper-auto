@@ -795,13 +795,21 @@ export class CourseBrushController {
       this.#mediaStuckTicks = 0;
       this.#lastMediaProgress = '';
 
-      const extraResult = (await this.browser.webContents.executeJavaScript(
-        buildHandleContentExtraTaskScript(this.#config),
-        true,
-      )) as {
-        action: 'done' | 'waiting' | 'none';
-        message: string;
-      };
+      let extraResult: { action: 'done' | 'waiting' | 'none'; message: string };
+      try {
+        extraResult = (await this.browser.webContents.executeJavaScript(
+          buildHandleContentExtraTaskScript(this.#config),
+          true,
+        )) as {
+          action: 'done' | 'waiting' | 'none';
+          message: string;
+        };
+      } catch (err) {
+        extraResult = {
+          action: 'waiting',
+          message: `执行讨论处理脚本容错：${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
 
       if (extraResult.action === 'waiting') {
         const discussWait = (this.#unitReloadAttempts.get(probe.url) ?? 0) + 1;
@@ -1012,13 +1020,22 @@ export class CourseBrushController {
     }
 
     // Case C: Discussion / Tuwen / PPT Courseware / Quiz Cover Page
-    const extraResult = (await this.browser.webContents.executeJavaScript(
-      buildHandleContentExtraTaskScript(this.#config),
-      true,
-    )) as {
-      action: 'done' | 'waiting' | 'none';
-      message: string;
-    };
+    let extraResult: { action: 'done' | 'waiting' | 'none'; message: string };
+    try {
+      extraResult = (await this.browser.webContents.executeJavaScript(
+        buildHandleContentExtraTaskScript(this.#config),
+        true,
+      )) as {
+        action: 'done' | 'waiting' | 'none';
+        message: string;
+      };
+    } catch (err) {
+      this.log(
+        'warn',
+        `⚠️ 辅助任务处理异常：${err instanceof Error ? err.message : String(err)}`,
+      );
+      extraResult = { action: 'none', message: '' };
+    }
 
     if (extraResult.action === 'waiting') {
       this.#currentTaskTitle = extraResult.message;
@@ -1305,14 +1322,25 @@ export class CourseBrushController {
 
     // 1. On AI Workspace or Pro LMS content page, advance directly to the next unfinished enabled unit in the sidebar!
     if (route === 'pro-lms-content' || route === 'ai-workspace') {
-      const advanced = (await this.browser.webContents.executeJavaScript(
-        buildAdvanceToNextUnitOrBackScript(
-          this.#config,
-          Array.from(this.#processedDirectoryKeys),
-          Array.from(this.#completedLeafKeys),
-        ),
-        true,
-      )) as { advanced: boolean; key?: string; message: string };
+      let advanced: { advanced: boolean; key?: string; message: string } = {
+        advanced: false,
+        message: '',
+      };
+      try {
+        advanced = (await this.browser.webContents.executeJavaScript(
+          buildAdvanceToNextUnitOrBackScript(
+            this.#config,
+            Array.from(this.#processedDirectoryKeys),
+            Array.from(this.#completedLeafKeys),
+          ),
+          true,
+        )) as { advanced: boolean; key?: string; message: string };
+      } catch (err) {
+        this.log(
+          'warn',
+          `推进下一单元脚本容错：${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       if (advanced.advanced) {
         if (advanced.key) {
           this.#processedDirectoryKeys.add(advanced.key);
@@ -1631,6 +1659,59 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
       t = t.replace(/^(视频|音频|课件|文档|作业|练习|测验|讨论|图文)\1/i, '$1');
       return t.replace(/[\s\-_—·:：/\\()[\]{}【】（）.…]/g, '').toLowerCase();
     }
+
+    function yktWalkProgress(nodes, list, byId) {
+      if (!nodes) return;
+      const arr = Array.isArray(nodes) ? nodes : typeof nodes === 'object' ? Object.values(nodes) : [];
+      for (const node of arr) {
+        if (!node || typeof node !== 'object') continue;
+        const children = node.section_leaf_list || node.leaf_list || node.children || node.section_list || node.course_chapter;
+        if (Array.isArray(children)) {
+          yktWalkProgress(children, list, byId);
+        }
+        if (node.id !== undefined && (node.progress !== undefined || node.leaf_type !== undefined || node.completed !== undefined)) {
+          const item = {
+            id: String(node.id),
+            name: String(node.name || node.title || '').replace(/\s+/g, ' ').trim(),
+            leafType: node.leaf_type,
+            progress: Number(node.progress !== undefined ? node.progress : (node.completed ? 1 : 0)),
+          };
+          list.push(item);
+          byId[item.id] = item;
+        }
+      }
+    }
+
+    async function yktEnsureProgressCache(classroomId) {
+      if (!classroomId) return null;
+      const now = Date.now();
+      const cache = window.__yktProgressCache;
+      if (cache && cache.classroomId === classroomId && now - cache.ts <= 4000) {
+        return cache;
+      }
+      try {
+        const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + classroomId, {
+          credentials: 'include',
+        });
+        if (resp.ok) {
+          const json = await resp.json();
+          const list = [];
+          const byId = {};
+          yktWalkProgress(json?.data?.course_progress || json?.data, list, byId);
+          if (list.length > 0) {
+            window.__yktProgressCache = {
+              classroomId,
+              ts: now,
+              list,
+              byId,
+            };
+            return window.__yktProgressCache;
+          }
+        }
+      } catch {}
+      return window.__yktProgressCache || null;
+    }
+
     function yktApplyOrderedProgress(boxes, list) {
       if (!boxes || !list || !Array.isArray(list) || list.length === 0) return;
       const boxArr = Array.from(boxes);
@@ -1682,6 +1763,46 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
         if ((m.progress || 0) >= 0.995) box.setAttribute('data-ykt-leaf-done', 'true');
         else box.removeAttribute('data-ykt-leaf-done');
       }
+    }
+
+    function yktIsAiBoxDone(box, completedCacheSet) {
+      if (!box) return false;
+      const attrDone = box.getAttribute('data-ykt-leaf-done');
+      if (attrDone === 'true') return true;
+      const pct = box.getAttribute('data-ykt-leaf-pct');
+      if (pct !== null && Number(pct) >= 99) return true;
+
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId) {
+        if (completedCacheSet && completedCacheSet.has(leafId)) return true;
+        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
+        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
+      }
+
+      const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
+      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
+
+      // Check all possible icon elements: i, svg, use, span, div
+      const icons = Array.from(box.querySelectorAll('i, svg, use, span, div'));
+      for (const el of icons) {
+        const cls = String(el.className?.baseVal || el.className || el.getAttribute('class') || '').toLowerCase();
+        const href = String(el.getAttribute('xlink:href') || el.getAttribute('href') || '').toLowerCase();
+        const combined = cls + ' ' + href;
+        if (/uncheck|not|incomplete|false/i.test(combined)) continue;
+        if (/circle-check|check-circle|icon-check|icon-gou|icon-wancheng|gou|wancheng|finish|success|completed|is-done|is-success/.test(combined)) {
+          return true;
+        }
+      }
+
+      try {
+        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
+          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
+        }
+      } catch {}
+
+      return false;
     }
 `;
 
@@ -1774,51 +1895,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     const aiCurrentLeafId = aiMatch && aiMatch[2] ? aiMatch[2] : '';
 
     if (aiClassroomId) {
-      const now = Date.now();
-      const cache = window.__yktProgressCache;
-      if (!cache || cache.classroomId !== aiClassroomId || now - cache.ts > 3500) {
-        try {
-          const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + aiClassroomId, {
-            credentials: 'include',
-          });
-          if (resp.ok) {
-            const json = await resp.json();
-            const list = [];
-            const byId = {};
-            function walkProgress(nodes) {
-              if (!Array.isArray(nodes)) return;
-              for (const node of nodes) {
-                if (!node || typeof node !== 'object') continue;
-                if (Array.isArray(node.section_leaf_list)) {
-                  walkProgress(node.section_leaf_list);
-                } else if (Array.isArray(node.children)) {
-                  walkProgress(node.children);
-                } else if (node.id !== undefined && node.progress !== undefined) {
-                  const item = {
-                    id: String(node.id),
-                    name: String(node.name || '').replace(/\\s+/g, ' ').trim(),
-                    leafType: node.leaf_type,
-                    progress: Number(node.progress || 0),
-                  };
-                  list.push(item);
-                  byId[item.id] = item;
-                }
-              }
-            }
-            walkProgress(json?.data?.course_progress);
-            if (list.length > 0) {
-              window.__yktProgressCache = {
-                classroomId: aiClassroomId,
-                ts: now,
-                list,
-                byId,
-              };
-            }
-          }
-        } catch {}
-      }
-
-      const activeCache = window.__yktProgressCache;
+      const activeCache = await yktEnsureProgressCache(aiClassroomId);
       if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
         yktApplyOrderedProgress(queryAllDocs('.nav-item-leaf-box'), activeCache.list);
       }
@@ -1831,10 +1908,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
         if ((cache.byId[aiCurrentLeafId].progress || 0) >= 0.995) return true;
       }
       if (activeLeafBox) {
-        const attrDone = activeLeafBox.getAttribute('data-ykt-leaf-done');
-        if (attrDone === 'true') return true;
-        const pct = activeLeafBox.getAttribute('data-ykt-leaf-pct');
-        if (pct !== null && Number(pct) >= 99) return true;
+        if (yktIsAiBoxDone(activeLeafBox)) return true;
       }
       const candidates = document.querySelectorAll('span, div, p, em, i, b, strong');
       for (const el of candidates) {
@@ -1854,48 +1928,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     const aiUnitCompleted = isAiWorkspaceCurrentUnitCompleted();
 
     function isAiBoxDone(box) {
-      if (!box) return false;
-      const attrDone = box.getAttribute('data-ykt-leaf-done');
-      if (attrDone === 'true') return true;
-      const pct = box.getAttribute('data-ykt-leaf-pct');
-      if (pct !== null && Number(pct) >= 99) return true;
-
-      const leafId = box.getAttribute('data-ykt-leaf-id');
-      if (leafId) {
-        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
-        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
-      }
-
-      const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
-      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
-
-      const uses = Array.from(box.querySelectorAll('use'));
-      for (const u of uses) {
-        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
-        if (/uncheck|not|incomplete|false/i.test(h)) continue;
-        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
-          return true;
-        }
-      }
-
-      const svgs = box.querySelectorAll('svg');
-      for (const s of svgs) {
-        const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/uncheck|not/i.test(sCls)) continue;
-        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
-          return true;
-        }
-      }
-
-      try {
-        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
-          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
-        }
-      } catch {}
-
-      return false;
+      return yktIsAiBoxDone(box);
     }
 
     function detectAiUnitKind() {
@@ -3254,235 +3287,248 @@ function buildCheckAndRunV2InlineTaskScript(
 
 export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
   return `(async () => {
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-    const config = ${JSON.stringify(config)};
+    try {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const config = ${JSON.stringify(config)};
 
-    function getAccessibleDocs() {
-      const docs = [document];
-      for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
-        try {
-          if (ifr.contentDocument && ifr.contentDocument.body) docs.push(ifr.contentDocument);
-        } catch {}
-      }
-      return docs;
-    }
-
-    const url = location.href;
-    const activeLeaf = document.querySelector('.nav-item-leaf-box .leaf-item.is-active, .nav-item-leaf-box .leaf-item.active, .leaf-item.is-active, .leaf-item.active, .nav-item-leaf-box.is-active, .nav-item-leaf-box.active');
-    const activeLeafText = (activeLeaf?.textContent || '').replace(/\\s+/g, ' ').trim();
-    const isAiDiscussUnit =
-      /\\/ai-workspace\\/lms-graph\\/[^/]+\\/(forum|discuss|discussion)/i.test(url) ||
-      /^讨论/.test(activeLeafText);
-
-    for (const doc of getAccessibleDocs()) {
-      const win = doc.defaultView || window;
-      const docUrl = doc.location?.href || '';
-
-      // 0. Handle iframe-quiz cover page ("开始做题" / "继续做题")
-      if (config.enableHomework && (docUrl.includes('/iframe-quiz/') || docUrl.includes('/v/exam/') || /^作业|^练习|^测验/.test(activeLeafText))) {
-        const bodyText = (doc.body?.innerText || '').replace(/\\s+/g, ' ').trim();
-        const startExamBtn = Array.from(doc.querySelectorAll('button, .el-button, a, div[role="button"], span.btn')).find((b) => {
-          const t = (b.innerText || b.textContent || '').replace(/\\s+/g, '').trim();
-          return /^(开始做题|继续做题|开始答题|继续答题|去作答|立即作答|重新作答)$/.test(t);
-        });
-        if (startExamBtn && typeof startExamBtn.click === 'function') {
-          startExamBtn.click();
-          await sleep(1500);
-          return { action: 'waiting', message: '已点击「开始做题」，正在进入试卷…' };
+      function getAccessibleDocs() {
+        const docs = [document];
+        for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
+          try {
+            if (ifr.contentDocument && ifr.contentDocument.body) docs.push(ifr.contentDocument);
+          } catch {}
         }
-        if (docUrl.includes('/cover') && /(已完成|已提交|得分|成绩|查看试卷)/.test(bodyText) && !startExamBtn) {
-          return { action: 'done', message: '该章节测验已完成' };
-        }
+        return docs;
       }
 
-      const checkBtn = doc.querySelector('.ppt_img_box .check, p.check');
-      if (
-        checkBtn &&
-        typeof checkBtn.click === 'function' &&
-        (checkBtn.textContent || '').trim() === '查看课件' &&
-        !doc.querySelector('.swiper-wrapper .swiper-slide') &&
-        config.enableCourseware
-      ) {
-        checkBtn.click();
-        await sleep(1800);
-      }
+      const url = location.href;
+      const activeLeaf = document.querySelector('.nav-item-leaf-box .leaf-item.is-active, .nav-item-leaf-box .leaf-item.active, .leaf-item.is-active, .leaf-item.active, .nav-item-leaf-box.is-active, .nav-item-leaf-box.active');
+      const activeLeafText = (activeLeaf?.textContent || '').replace(/\\s+/g, ' ').trim();
+      const isAiDiscussUnit =
+        /\\/ai-workspace\\/lms-graph\\/[^/]+\\/(forum|discuss|discussion)/i.test(url) ||
+        /^讨论/.test(activeLeafText);
 
-      const slides = doc.querySelectorAll('.swiper-wrapper .swiper-slide');
-      if (slides.length > 0 && config.enableCourseware && !win.__yktSlidesClicked) {
-        win.__yktSlidesClicked = true;
-        for (let i = 0; i < slides.length; i += 1) {
-          slides[i].click();
-          await sleep(500);
+      for (const doc of getAccessibleDocs()) {
+        const win = doc.defaultView || window;
+        const docUrl = doc.location?.href || '';
+
+        // 0. Handle iframe-quiz cover page ("开始做题" / "继续做题")
+        if (config.enableHomework && (docUrl.includes('/iframe-quiz/') || docUrl.includes('/v/exam/') || /^作业|^练习|^测验/.test(activeLeafText))) {
+          const bodyText = (doc.body?.innerText || '').replace(/\\s+/g, ' ').trim();
+          const startExamBtn = Array.from(doc.querySelectorAll('button, .el-button, a, div[role="button"], span.btn')).find((b) => {
+            const t = (b.innerText || b.textContent || '').replace(/\\s+/g, '').trim();
+            return /^(开始做题|继续做题|开始答题|继续答题|去作答|立即作答|重新作答)$/.test(t);
+          });
+          if (startExamBtn && typeof startExamBtn.click === 'function') {
+            startExamBtn.click();
+            await sleep(1500);
+            return { action: 'waiting', message: '已点击「开始做题」，正在进入试卷…' };
+          }
+          if (docUrl.includes('/cover') && /(已完成|已提交|得分|成绩|查看试卷)/.test(bodyText) && !startExamBtn) {
+            return { action: 'done', message: '该章节测验已完成' };
+          }
         }
+
+        const checkBtn = doc.querySelector('.ppt_img_box .check, p.check');
+        if (
+          checkBtn &&
+          typeof checkBtn.click === 'function' &&
+          (checkBtn.textContent || '').trim() === '查看课件' &&
+          !doc.querySelector('.swiper-wrapper .swiper-slide') &&
+          config.enableCourseware
+        ) {
+          checkBtn.click();
+          await sleep(1800);
+        }
+
+        const slides = doc.querySelectorAll('.swiper-wrapper .swiper-slide');
+        if (slides.length > 0 && config.enableCourseware && !win.__yktSlidesClicked) {
+          win.__yktSlidesClicked = true;
+          for (let i = 0; i < slides.length; i += 1) {
+            slides[i].click();
+            await sleep(500);
+          }
+          const unplayedVideoBox = Array.from(doc.querySelectorAll('.video-box')).find(
+            (vb) => !(vb.textContent || '').includes('已完成')
+          );
+          if (unplayedVideoBox && typeof unplayedVideoBox.click === 'function') {
+            unplayedVideoBox.click();
+            await sleep(1200);
+            return { action: 'waiting', message: '课件 PPT 已翻完，正在播放内嵌视频…' };
+          }
+          return { action: 'done', message: '课件 PPT (' + slides.length + ' 页) 已浏览完毕' };
+        }
+
         const unplayedVideoBox = Array.from(doc.querySelectorAll('.video-box')).find(
           (vb) => !(vb.textContent || '').includes('已完成')
         );
-        if (unplayedVideoBox && typeof unplayedVideoBox.click === 'function') {
+        if (unplayedVideoBox && typeof unplayedVideoBox.click === 'function' && !doc.querySelector('video') && config.enableCourseware) {
           unplayedVideoBox.click();
           await sleep(1200);
-          return { action: 'waiting', message: '课件 PPT 已翻完，正在播放内嵌视频…' };
+          return { action: 'waiting', message: '已打开课件内嵌视频播放器…' };
         }
-        return { action: 'done', message: '课件 PPT (' + slides.length + ' 页) 已浏览完毕' };
-      }
 
-      const unplayedVideoBox = Array.from(doc.querySelectorAll('.video-box')).find(
-        (vb) => !(vb.textContent || '').includes('已完成')
-      );
-      if (unplayedVideoBox && typeof unplayedVideoBox.click === 'function' && !doc.querySelector('video') && config.enableCourseware) {
-        unplayedVideoBox.click();
-        await sleep(1200);
-        return { action: 'waiting', message: '已打开课件内嵌视频播放器…' };
-      }
+        // Discussion unit handling (only on dedicated discussion pages or #new_discuss, never on video pages)
+        if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss, .publish_discuss, .discuss-list'))) {
+          function hasUserAlreadyCommentedInPage(d) {
+            try {
+              const ownActions = Array.from(
+                d.querySelectorAll(
+                  '#new_discuss [class*="del"], #new_discuss [class*="delete"], #new_discuss [class*="edit"], .discuss-list [class*="del"], .discuss-list [class*="delete"], .discuss-list [class*="edit"], .new_discuss_list [class*="del"], .new_discuss_list [class*="delete"], .del-btn, .delete-btn, .btn-del'
+                )
+              );
+              if (ownActions.some((el) => {
+                const t = (el.textContent || '').trim();
+                const cls = String(el.className?.baseVal || el.className || el.getAttribute('class') || '');
+                return /删除|撤回|编辑/i.test(t) || cls.includes('del') || cls.includes('delete');
+              })) {
+                return true;
+              }
 
-      // Discussion unit handling (only on dedicated discussion pages or #new_discuss, never on video pages)
-      if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss, .publish_discuss, .discuss-list'))) {
-        function hasUserAlreadyCommentedInPage(d) {
-          const ownActions = Array.from(
-            d.querySelectorAll(
-              '#new_discuss [class*="del"], #new_discuss [class*="delete"], #new_discuss [class*="edit"], .discuss-list [class*="del"], .discuss-list [class*="delete"], .discuss-list [class*="edit"], .new_discuss_list [class*="del"], .new_discuss_list [class*="delete"], .del-btn, .delete-btn, .btn-del'
+              const myBadges = Array.from(d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]'));
+              if (myBadges.length > 0) return true;
+
+              const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
+              const leafId = leafMatch ? leafMatch[1] : '';
+              if (leafId && stored.some((item) => String(item) === String(leafId))) {
+                return true;
+              }
+              if (stored.includes(location.href)) {
+                return true;
+              }
+            } catch {}
+
+            return false;
+          }
+
+          function markDiscussDoneInStorage() {
+            try {
+              const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
+              const leafId = leafMatch ? leafMatch[1] : '';
+              if (leafId && /^\\d+$/.test(leafId) && !stored.includes(leafId)) {
+                stored.push(leafId);
+                localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
+              }
+            } catch {}
+            win.__yktLastDiscussUrl = url;
+          }
+
+          if (win.__yktLastDiscussUrl === url || hasUserAlreadyCommentedInPage(doc)) {
+            markDiscussDoneInStorage();
+            return { action: 'done', message: '当前讨论单元已发言过，无需重复发言，直接跳过' };
+          }
+
+          const discussCandidates = Array.from(
+            doc.querySelectorAll(
+              '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, [class*="comment"] [class*="content"], [class*="discuss"] p, [class*="reply"] p, [class*="post"] p'
             )
           );
-          if (ownActions.some((el) => {
-            const t = (el.textContent || '').trim();
-            return /删除|撤回|编辑/i.test(t) || el.className.includes('del') || el.className.includes('delete');
-          })) {
-            return true;
-          }
-
-          const myBadges = Array.from(d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]'));
-          if (myBadges.length > 0) return true;
-
-          try {
-            const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-            const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
-            const leafId = leafMatch ? leafMatch[1] : '';
-            if (leafId && stored.some((item) => String(item) === String(leafId))) {
-              return true;
-            }
-            if (stored.includes(location.href)) {
-              return true;
-            }
-          } catch {}
-
-          return false;
-        }
-
-        function markDiscussDoneInStorage() {
-          try {
-            const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-            const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
-            const leafId = leafMatch ? leafMatch[1] : '';
-            if (leafId && /^\d+$/.test(leafId) && !stored.includes(leafId)) {
-              stored.push(leafId);
-              localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
-            }
-          } catch {}
-          win.__yktLastDiscussUrl = url;
-        }
-
-        if (win.__yktLastDiscussUrl === url || hasUserAlreadyCommentedInPage(doc)) {
-          markDiscussDoneInStorage();
-          return { action: 'done', message: '当前讨论单元已发言过，无需重复发言，直接跳过' };
-        }
-
-        const discussCandidates = Array.from(
-          doc.querySelectorAll(
-            '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, [class*="comment"] [class*="content"], [class*="discuss"] p, [class*="reply"] p, [class*="post"] p'
-          )
-        );
-        const firstValidComment = discussCandidates
-          .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
-          .find(
-            (t) =>
-              t.length >= 2 &&
-              t.length <= 220 &&
-              !/^\d{4}[-/]\d{1,2}/.test(t) &&
-              !/^\d+$/.test(t) &&
-              !/发表你的观点|暂无评论|还没有人发言|Shift\+Enter|全部评论|话题详情|编辑于|条评论/.test(t)
-          );
-
-        let inputEl = doc.querySelector(
-          'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
-        );
-        if (!inputEl) {
-          const triggerBtn = Array.from(
-            doc.querySelectorAll('button, .el-button, a, span, div, p')
-          ).find((b) => {
-            if (!b || b.children.length > 2) return false;
-            const t = (b.textContent || '').replace(/\\s+/g, '').trim();
-            return /^(参与讨论|发表观点|写评论|发表评论|我也说两句|添加评论|写回答|说点什么|发表讨论)$/.test(t) ||
-                   /说点什么|参与讨论|发表观点/.test(t.slice(0, 8));
-          });
-          if (triggerBtn && typeof triggerBtn.click === 'function') {
-            triggerBtn.click();
-            await sleep(600);
-            inputEl = doc.querySelector(
-              'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
+          const firstValidComment = discussCandidates
+            .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim())
+            .find(
+              (t) =>
+                t.length >= 2 &&
+                t.length <= 220 &&
+                !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
+                !/^\\d+$/.test(t) &&
+                !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论/.test(t)
             );
-          }
-        }
 
-        let submitBtn =
-          doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn, #new_discuss button[class*="submit"], #new_discuss button[class*="post"]') ||
-          Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"], span, div')).find((b) =>
-            /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\\s+/g, '').trim())
+          let inputEl = doc.querySelector(
+            'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
           );
-
-        if (!submitBtn && inputEl) {
-          const inputWrap = inputEl.parentElement?.parentElement || inputEl.parentElement;
-          if (inputWrap) {
-            const enterHint = Array.from(inputWrap.querySelectorAll('span, div')).find(
-              (el) => el.children.length === 0 && /Enter\\s*发送/i.test(el.textContent || '')
-            );
-            if (enterHint && enterHint.parentElement) {
-              submitBtn =
-                enterHint.nextElementSibling ||
-                enterHint.parentElement.querySelector('button, svg, i, [class*="send"], [class*="submit"]') ||
-                enterHint.parentElement.lastElementChild;
+          if (!inputEl) {
+            const triggerBtn = Array.from(
+              doc.querySelectorAll('button, .el-button, a, span, div, p')
+            ).find((b) => {
+              if (!b || b.children.length > 2) return false;
+              const t = (b.textContent || '').replace(/\\s+/g, '').trim();
+              return /^(参与讨论|发表观点|写评论|发表评论|我也说两句|添加评论|写回答|说点什么|发表讨论)$/.test(t) ||
+                     /说点什么|参与讨论|发表观点/.test(t.slice(0, 8));
+            });
+            if (triggerBtn && typeof triggerBtn.click === 'function') {
+              triggerBtn.click();
+              await sleep(600);
+              inputEl = doc.querySelector(
+                'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea, .el-textarea textarea, [class*="discuss"] [contenteditable], [class*="comment"] [contenteditable]'
+              );
             }
           }
-        }
 
-        if (inputEl) {
-          const text = firstValidComment || '坚持党的领导，坚定理想信念！';
-          inputEl.focus();
-          try {
-            doc.execCommand('selectAll', false, null);
-            doc.execCommand('insertText', false, text);
-          } catch {}
-          if (inputEl.tagName === 'TEXTAREA' || inputEl.tagName === 'INPUT') {
-            const desc = win.HTMLTextAreaElement ? Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value') : null;
-            if (desc && desc.set) desc.set.call(inputEl, text);
-            else inputEl.value = text;
-            inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
-            inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
-          } else {
-            if (!inputEl.innerText || !inputEl.innerText.trim()) inputEl.innerText = text;
-            inputEl.dispatchEvent(new win.InputEvent('input', { bubbles: true, data: text }));
-            inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
-          }
-          await sleep(500);
-          if (submitBtn && typeof submitBtn.click === 'function') {
-            submitBtn.click();
-          }
-          try {
-            const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-            inputEl.dispatchEvent(new win.KeyboardEvent('keydown', enterOpts));
-            inputEl.dispatchEvent(new win.KeyboardEvent('keypress', enterOpts));
-            inputEl.dispatchEvent(new win.KeyboardEvent('keyup', enterOpts));
-          } catch {}
-          markDiscussDoneInStorage();
-          await sleep(1500);
-          return { action: 'done', message: '讨论区已自动发表评论：' + text.slice(0, 20) };
-        }
+          let submitBtn =
+            doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn, #new_discuss button[class*="submit"], #new_discuss button[class*="post"]') ||
+            Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"], span, div')).find((b) =>
+              /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\\s+/g, '').trim())
+            );
 
-        if (isAiDiscussUnit) {
-          return { action: 'waiting', message: '正在等待讨论区评论输入框加载…' };
+          if (!submitBtn && inputEl) {
+            const inputWrap = inputEl.parentElement?.parentElement || inputEl.parentElement;
+            if (inputWrap) {
+              const enterHint = Array.from(inputWrap.querySelectorAll('span, div')).find(
+                (el) => el.children.length === 0 && /Enter\\s*发送/i.test(el.textContent || '')
+              );
+              if (enterHint && enterHint.parentElement) {
+                submitBtn =
+                  enterHint.nextElementSibling ||
+                  enterHint.parentElement.querySelector('button, svg, i, [class*="send"], [class*="submit"]') ||
+                  enterHint.parentElement.lastElementChild;
+              }
+            }
+          }
+
+          if (inputEl) {
+            const text = firstValidComment || '坚持党的领导，坚定理想信念！';
+            try {
+              inputEl.focus();
+              try {
+                doc.execCommand('selectAll', false, null);
+                doc.execCommand('insertText', false, text);
+              } catch {}
+              if (inputEl.tagName === 'TEXTAREA' || inputEl.tagName === 'INPUT') {
+                const desc = win.HTMLTextAreaElement ? Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value') : null;
+                if (desc && desc.set) desc.set.call(inputEl, text);
+                else inputEl.value = text;
+                inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
+                inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+              } else {
+                if (!inputEl.innerText || !inputEl.innerText.trim()) inputEl.innerText = text;
+                try {
+                  inputEl.dispatchEvent(new win.InputEvent('input', { bubbles: true, data: text }));
+                } catch {
+                  inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
+                }
+                inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+              }
+              await sleep(500);
+              if (submitBtn && typeof submitBtn.click === 'function') {
+                submitBtn.click();
+              }
+              try {
+                const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+                inputEl.dispatchEvent(new win.KeyboardEvent('keydown', enterOpts));
+                inputEl.dispatchEvent(new win.KeyboardEvent('keypress', enterOpts));
+                inputEl.dispatchEvent(new win.KeyboardEvent('keyup', enterOpts));
+              } catch {}
+              markDiscussDoneInStorage();
+              await sleep(1500);
+              return { action: 'done', message: '讨论区已自动发表评论：' + text.slice(0, 20) };
+            } catch (postErr) {
+              return { action: 'waiting', message: '发表评论容错: ' + (postErr?.message || postErr) };
+            }
+          }
+
+          if (isAiDiscussUnit) {
+            return { action: 'waiting', message: '正在等待讨论区评论输入框加载…' };
+          }
         }
       }
-    }
 
-    return { action: 'none', message: '' };
+      return { action: 'none', message: '' };
+    } catch (err) {
+      return { action: 'waiting', message: '讨论/课件任务处理中…' };
+    }
   })()`;
 }
 
@@ -3492,6 +3538,7 @@ export function buildAdvanceToNextUnitOrBackScript(
   completedKeys: readonly string[] = [],
 ): string {
   return `(async () => {
+    try {
 ${ORDERED_PROGRESS_MAPPING_JS}
     const config = ${JSON.stringify(config)};
     const processed = new Set(${JSON.stringify(processedKeys)});
@@ -3556,49 +3603,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     }
 
     function isAiBoxDone(box) {
-      if (!box) return false;
-      const attrDone = box.getAttribute('data-ykt-leaf-done');
-      if (attrDone === 'true') return true;
-      const pct = box.getAttribute('data-ykt-leaf-pct');
-      if (pct !== null && Number(pct) >= 99) return true;
-
-      const leafId = box.getAttribute('data-ykt-leaf-id');
-      if (leafId) {
-        if (completedCache.has(leafId)) return true;
-        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
-        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
-      }
-
-      const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
-      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
-
-      const uses = Array.from(box.querySelectorAll('use'));
-      for (const u of uses) {
-        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
-        if (/uncheck|not|incomplete|false/i.test(h)) continue;
-        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
-          return true;
-        }
-      }
-
-      const svgs = box.querySelectorAll('svg');
-      for (const s of svgs) {
-        const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/uncheck|not/i.test(sCls)) continue;
-        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
-          return true;
-        }
-      }
-
-      try {
-        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
-          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
-        }
-      } catch {}
-
-      return false;
+      return yktIsAiBoxDone(box, completedCache);
     }
 
     for (const doc of docs) {
@@ -3617,57 +3622,19 @@ ${ORDERED_PROGRESS_MAPPING_JS}
       if (navItems.length > 0) {
         const aiMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/(\\d+)/i);
         const aiClassroomId = aiMatch ? aiMatch[1] : '';
-        if (aiClassroomId && (!window.__yktProgressCache || window.__yktProgressCache.classroomId !== aiClassroomId)) {
-          try {
-            const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + aiClassroomId, {
-              credentials: 'include',
-            });
-            if (resp.ok) {
-              const json = await resp.json();
-              const list = [];
-              const byId = {};
-              function walkProgress(nodes) {
-                if (!Array.isArray(nodes)) return;
-                for (const node of nodes) {
-                  if (!node || typeof node !== 'object') continue;
-                  if (Array.isArray(node.section_leaf_list)) {
-                    walkProgress(node.section_leaf_list);
-                  } else if (Array.isArray(node.children)) {
-                    walkProgress(node.children);
-                  } else if (node.id !== undefined && node.progress !== undefined) {
-                    const item = {
-                      id: String(node.id),
-                      name: String(node.name || '').replace(/\\s+/g, ' ').trim(),
-                      leafType: node.leaf_type,
-                      progress: Number(node.progress || 0),
-                    };
-                    list.push(item);
-                    byId[item.id] = item;
-                  }
-                }
-              }
-              walkProgress(json?.data?.course_progress);
-              if (list.length > 0) {
-                window.__yktProgressCache = {
-                  classroomId: aiClassroomId,
-                  ts: Date.now(),
-                  list,
-                  byId,
-                };
-              }
-            }
-          } catch {}
+        if (aiClassroomId) {
+          const activeCache = await yktEnsureProgressCache(aiClassroomId);
+          if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
+            yktApplyOrderedProgress(navItems, activeCache.list);
+          }
         }
 
-        const activeCache = window.__yktProgressCache;
-        if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
-          yktApplyOrderedProgress(navItems, activeCache.list);
-        }
-
-        let activeIdx = navItems.findIndex((el) =>
-          /active|current|is-active|selected/i.test((el.className || '') + ' ' + (el.firstElementChild?.className || '')) ||
-          Boolean(el.querySelector('.is-active, .active'))
-        );
+        let activeIdx = navItems.findIndex((el) => {
+          const cls = String(el.className?.baseVal || el.className || '');
+          const firstChildCls = String(el.firstElementChild?.className?.baseVal || el.firstElementChild?.className || '');
+          if (/active|current|is-active|selected/i.test(cls + ' ' + firstChildCls)) return true;
+          return Boolean(el.querySelector('.is-active, .active, [class*="active"], [class*="selected"]'));
+        });
         if (activeIdx === -1) {
           const m = location.href.match(/node_id=(\\d+)/i) || location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i);
           if (m && m[1]) {
@@ -3683,15 +3650,15 @@ ${ORDERED_PROGRESS_MAPPING_JS}
             });
           }
         }
+        if (activeIdx === -1 && /\\/(forum|discuss|discussion)/i.test(location.href)) {
+          activeIdx = navItems.findIndex((el) => isDiscussItem(el));
+        }
 
         const scanOrder = [];
         if (activeIdx !== -1) {
-          // Strictly scan forward first
+          // Strictly scan forward only: from current unit to the end of the course.
+          // Never loop back to earlier chapters/videos!
           for (let i = activeIdx + 1; i < navItems.length; i += 1) {
-            scanOrder.push(i);
-          }
-          // Only as fallback if all forward items are done, check 0..activeIdx - 1
-          for (let i = 0; i < activeIdx; i += 1) {
             scanOrder.push(i);
           }
         } else {
@@ -3746,7 +3713,10 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     }
 
     return { advanced: false, message: '' };
-  })()`;
+  } catch (err) {
+    return { advanced: false, message: '推进下一单元脚本容错: ' + (err?.message || err) };
+  }
+})()`;
 }
 
 export function buildDetectAndJumpToFirstIncompleteScript(
@@ -3823,48 +3793,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     }
 
     function isAiBoxDone(box) {
-      if (!box) return false;
-      const attrDone = box.getAttribute('data-ykt-leaf-done');
-      if (attrDone === 'true') return true;
-      const pct = box.getAttribute('data-ykt-leaf-pct');
-      if (pct !== null && Number(pct) >= 99) return true;
-
-      const leafId = box.getAttribute('data-ykt-leaf-id');
-      if (leafId) {
-        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
-        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
-      }
-
-      const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
-      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
-
-      const uses = Array.from(box.querySelectorAll('use'));
-      for (const u of uses) {
-        const h = (u.getAttribute('xlink:href') || u.getAttribute('href') || '').toLowerCase();
-        if (/uncheck|not|incomplete|false/i.test(h)) continue;
-        if (/wancheng|finish|icon-gou|icon-check|checked/i.test(h)) {
-          return true;
-        }
-      }
-
-      const svgs = box.querySelectorAll('svg');
-      for (const s of svgs) {
-        const sCls = (s.getAttribute('class') || '').toLowerCase();
-        if (/uncheck|not/i.test(sCls)) continue;
-        if (/icon-gou|icon-wancheng|is-done|is-finished|is-completed|is-success/.test(sCls)) {
-          return true;
-        }
-      }
-
-      try {
-        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
-          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
-        }
-      } catch {}
-
-      return false;
+      return yktIsAiBoxDone(box, completedCache);
     }
 
     // 1. AI Workspace sidebar check (.nav-item-leaf-box)
@@ -3874,57 +3803,19 @@ ${ORDERED_PROGRESS_MAPPING_JS}
       if (navItems.length > 0) {
         const aiMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/(\\d+)/i);
         const aiClassroomId = aiMatch ? aiMatch[1] : '';
-        if (aiClassroomId && (!window.__yktProgressCache || window.__yktProgressCache.classroomId !== aiClassroomId)) {
-          try {
-            const resp = await fetch('/c27/online_courseware/schedule/course/progress/?classroom_id=' + aiClassroomId, {
-              credentials: 'include',
-            });
-            if (resp.ok) {
-              const json = await resp.json();
-              const list = [];
-              const byId = {};
-              function walkProgress(nodes) {
-                if (!Array.isArray(nodes)) return;
-                for (const node of nodes) {
-                  if (!node || typeof node !== 'object') continue;
-                  if (Array.isArray(node.section_leaf_list)) {
-                    walkProgress(node.section_leaf_list);
-                  } else if (Array.isArray(node.children)) {
-                    walkProgress(node.children);
-                  } else if (node.id !== undefined && node.progress !== undefined) {
-                    const item = {
-                      id: String(node.id),
-                      name: String(node.name || '').replace(/\\s+/g, ' ').trim(),
-                      leafType: node.leaf_type,
-                      progress: Number(node.progress || 0),
-                    };
-                    list.push(item);
-                    byId[item.id] = item;
-                  }
-                }
-              }
-              walkProgress(json?.data?.course_progress);
-              if (list.length > 0) {
-                window.__yktProgressCache = {
-                  classroomId: aiClassroomId,
-                  ts: Date.now(),
-                  list,
-                  byId,
-                };
-              }
-            }
-          } catch {}
+        if (aiClassroomId) {
+          const activeCache = await yktEnsureProgressCache(aiClassroomId);
+          if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
+            yktApplyOrderedProgress(navItems, activeCache.list);
+          }
         }
 
-        const activeCache = window.__yktProgressCache;
-        if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
-          yktApplyOrderedProgress(navItems, activeCache.list);
-        }
-
-        let activeIdx = navItems.findIndex((el) =>
-          /active|current|is-active|selected/i.test((el.className || '') + ' ' + (el.firstElementChild?.className || '')) ||
-          Boolean(el.querySelector('.is-active, .active'))
-        );
+        let activeIdx = navItems.findIndex((el) => {
+          const cls = String(el.className?.baseVal || el.className || '');
+          const firstChildCls = String(el.firstElementChild?.className?.baseVal || el.firstElementChild?.className || '');
+          if (/active|current|is-active|selected/i.test(cls + ' ' + firstChildCls)) return true;
+          return Boolean(el.querySelector('.is-active, .active, [class*="active"], [class*="selected"]'));
+        });
         if (activeIdx === -1) {
           const m = location.href.match(/node_id=(\\d+)/i) || location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i);
           if (m && m[1]) {
@@ -4025,10 +3916,16 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           if (pText.includes('已完成') || pText.includes('已读') || pText.includes('已提交') || pText.includes('100%')) {
             return true;
           }
-          const useEl = leaf.querySelector('i svg use, i use');
-          const href = (useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '').toLowerCase();
-          if (/uncheck|not|incomplete|false/i.test(href)) return false;
-          if (href.includes('wancheng') || href.includes('finish') || href.includes('gou') || href.includes('icon-check') || href.includes('checked')) return true;
+          const icons = Array.from(leaf.querySelectorAll('i, svg, use, span'));
+          for (const el of icons) {
+            const cls = String(el.className?.baseVal || el.className || el.getAttribute('class') || '').toLowerCase();
+            const href = String(el.getAttribute('xlink:href') || el.getAttribute('href') || '').toLowerCase();
+            const combined = cls + ' ' + href;
+            if (/uncheck|not|incomplete|false/i.test(combined)) continue;
+            if (/circle-check|check-circle|icon-check|icon-gou|icon-wancheng|gou|wancheng|finish|success|completed|is-done|is-success/.test(combined)) {
+              return true;
+            }
+          }
           return false;
         }
 
@@ -4089,7 +3986,10 @@ ${ORDERED_PROGRESS_MAPPING_JS}
     }
 
     return { ready: false, noSidebar: true, waitingForSidebar: true };
-  })()`;
+  } catch (err) {
+    return { ready: false, noSidebar: true, waitingForSidebar: true };
+  }
+})()`;
 }
 
 function buildInstallSandboxScript(mode: 'directory' | 'homework'): string {
