@@ -546,6 +546,8 @@ describe('CourseBrushController', () => {
       ['leaf-999'],
     );
 
+    expect(() => new Function(script)).not.toThrow();
+
     // Verify key robust identifiers
     expect(script).toContain('icon-shipin');
     expect(script).toContain('icon-wancheng');
@@ -574,6 +576,7 @@ describe('CourseBrushController', () => {
       [],
     );
 
+    expect(() => new Function(script)).not.toThrow();
     expect(script).toContain('Sequential progression across all candidates in chapter order');
     expect(script).not.toContain('Pass 1: Video Priority');
     expect(script).toContain("c.kind === 'discuss' && !config.enableDiscussion");
@@ -594,6 +597,7 @@ describe('CourseBrushController', () => {
       ['leaf-49460146'],
     );
 
+    expect(() => new Function(script)).not.toThrow();
     expect(script).toContain('yktCleanTitle');
     expect(script).toContain('yktApplyOrderedProgress');
     expect(script).toContain('data-ykt-leaf-done');
@@ -613,6 +617,7 @@ describe('CourseBrushController', () => {
       autoSubmitHomework: true,
     });
 
+    expect(() => new Function(script)).not.toThrow();
     expect(script).toContain('contenteditable');
     expect(script).toContain('markDiscussDoneInStorage');
     expect(script).toContain('__ykt_commented_discussions');

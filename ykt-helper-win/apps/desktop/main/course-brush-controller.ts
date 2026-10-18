@@ -771,7 +771,8 @@ export class CourseBrushController {
         itemType?: string;
       };
       return res;
-    } catch {
+    } catch (err) {
+      this.log('warn', `⚠️ 首项未完成单元探测脚本执行异常: ${err instanceof Error ? err.message : String(err)}`);
       return { ready: false, noSidebar: true };
     }
   }
@@ -3479,7 +3480,7 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
               if (myBadges.length > 0) return true;
 
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
+              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
               const leafId = leafMatch ? leafMatch[1] : '';
               if (leafId && stored.some((item) => String(item) === String(leafId))) {
                 return true;
@@ -3498,7 +3499,7 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
           function markDiscussDoneInStorage() {
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
+              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
               const leafId = leafMatch ? leafMatch[1] : '';
               if (leafId && /^\d+$/.test(leafId) && !stored.includes(leafId)) {
                 stored.push(leafId);
@@ -3854,6 +3855,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
   completedKeys: readonly string[] = [],
 ): string {
   return `(async () => {
+    try {
 ${ORDERED_PROGRESS_MAPPING_JS}
     const config = ${JSON.stringify(config)};
     const completedCache = new Set(${JSON.stringify(completedKeys)});
