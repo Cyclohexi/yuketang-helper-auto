@@ -1796,8 +1796,14 @@ function buildDomProbeScript(): string {
       const pct = box.getAttribute('data-ykt-leaf-pct');
       if (pct !== null && Number(pct) >= 99) return true;
 
+      const leafId = box.getAttribute('data-ykt-leaf-id');
+      if (leafId) {
+        const cacheProg = window.__yktProgressCache?.byId?.[leafId];
+        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
+      }
+
       const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/已完成|已读|已提交|100%/.test(t)) return true;
+      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
       const html = (box.innerHTML || '').toLowerCase();
       const uses = Array.from(box.querySelectorAll('use'));
@@ -1812,13 +1818,28 @@ function buildDomProbeScript(): string {
         return true;
       }
 
+      const svgs = box.querySelectorAll('svg');
+      for (const s of svgs) {
+        const sHtml = (s.innerHTML || '').toLowerCase();
+        const sCls = (s.getAttribute('class') || '').toLowerCase();
+        if (/check|finish|done|success|gou|wancheng/.test(sCls) || /check|finish|done|success|gou|wancheng/.test(sHtml)) {
+          return true;
+        }
+      }
+
       try {
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
         if (Array.isArray(completedStorage) && completedStorage.length > 0) {
-          const leafId = box.getAttribute('data-ykt-leaf-id');
           if (leafId && completedStorage.includes(leafId)) return true;
           const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '').toLowerCase();
           if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
+        }
+      } catch {}
+
+      try {
+        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
+          if (leafId && commentedStorage.some((k) => String(k).includes(leafId))) return true;
         }
       } catch {}
 
@@ -3020,62 +3041,19 @@ export function buildTriggerNextDirectoryItemScript(
         }
       }
 
-      // Prioritized execution across all candidates (Video First! Never click discussion when videos remain):
-      // Pass 1: Video Priority
-      if (config.enableVideo) {
-        const v = candidates.find((c) => c.kind === 'video');
-        if (v) {
-          v.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          v.el.click();
-          return { status: 'clicked', key: v.key, title: v.title, itemType: v.label };
-        }
-      }
-
-      // If video is enabled, but an unexpanded chapter is waiting and no video candidate was found yet, expand it!
-      if (config.enableVideo && pendingExpandBtn) {
-        pendingExpandBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-        pendingExpandBtn.click();
-        return { status: 'expanded', key: '', title: pendingExpandTitle };
-      }
-
-      // Pass 2: Homework Priority
-      if (config.enableHomework) {
-        const h = candidates.find((c) => c.kind === 'homework');
-        if (h) {
-          h.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          h.el.click();
-          return { status: 'clicked', key: h.key, title: h.title, itemType: h.label };
-        }
-      }
-
-      // Pass 3: Courseware Priority
-      if (config.enableCourseware) {
-        const cw = candidates.find((c) => c.kind === 'courseware');
-        if (cw) {
-          cw.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          cw.el.click();
-          return { status: 'clicked', key: cw.key, title: cw.title, itemType: cw.label };
-        }
-      }
-
-      // Pass 4: Classroom replay
-      if (config.enableReplay) {
-        const r = candidates.find((c) => c.kind === 'replay');
-        if (r) {
-          r.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          r.el.click();
-          return { status: 'clicked', key: r.key, title: r.title, itemType: r.label };
-        }
-      }
-
-      // Pass 5: Discussion Priority (ONLY after all video/homework/courseware are exhausted!)
-      if (config.enableDiscussion) {
-        const d = candidates.find((c) => c.kind === 'discuss');
-        if (d) {
-          d.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          d.el.click();
-          return { status: 'clicked', key: d.key, title: d.title, itemType: d.label };
-        }
+      // Sequential progression across all candidates in chapter order
+      const match = candidates.find((c) => {
+        if (c.kind === 'video' && !config.enableVideo) return false;
+        if (c.kind === 'homework' && !config.enableHomework) return false;
+        if (c.kind === 'courseware' && !config.enableCourseware) return false;
+        if (c.kind === 'replay' && !config.enableReplay) return false;
+        if (c.kind === 'discuss' && !config.enableDiscussion) return false;
+        return true;
+      });
+      if (match) {
+        match.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        match.el.click();
+        return { status: 'clicked', key: match.key, title: match.title, itemType: match.label };
       }
 
       if (pendingExpandBtn) {
@@ -3109,37 +3087,18 @@ export function buildTriggerNextDirectoryItemScript(
         leafCandidates.push({ el: leaf, key, title, kind, label });
       }
 
-      if (config.enableVideo) {
-        const v = leafCandidates.find((c) => c.kind === 'video');
-        if (v) {
-          v.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          v.el.click();
-          return { status: 'clicked', key: v.key, title: v.title, itemType: v.label };
-        }
-      }
-      if (config.enableHomework) {
-        const h = leafCandidates.find((c) => c.kind === 'homework');
-        if (h) {
-          h.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          h.el.click();
-          return { status: 'clicked', key: h.key, title: h.title, itemType: h.label };
-        }
-      }
-      if (config.enableCourseware) {
-        const cw = leafCandidates.find((c) => c.kind === 'courseware');
-        if (cw) {
-          cw.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          cw.el.click();
-          return { status: 'clicked', key: cw.key, title: cw.title, itemType: cw.label };
-        }
-      }
-      if (config.enableDiscussion) {
-        const d = leafCandidates.find((c) => c.kind === 'discuss');
-        if (d) {
-          d.el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          d.el.click();
-          return { status: 'clicked', key: d.key, title: d.title, itemType: d.label };
-        }
+      // Sequential progression across all leaf candidates in catalog order
+      const leafMatch = leafCandidates.find((c) => {
+        if (c.kind === 'video' && !config.enableVideo) return false;
+        if (c.kind === 'homework' && !config.enableHomework) return false;
+        if (c.kind === 'courseware' && !config.enableCourseware) return false;
+        if (c.kind === 'discuss' && !config.enableDiscussion) return false;
+        return true;
+      });
+      if (leafMatch) {
+        leafMatch.el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        leafMatch.el.click();
+        return { status: 'clicked', key: leafMatch.key, title: leafMatch.title, itemType: leafMatch.label };
       }
 
       // Check if we can scroll .viewContainer to load more items
@@ -3531,7 +3490,7 @@ function buildAdvanceToNextUnitOrBackScript(
       }
 
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (/已完成|已读|已提交|100%/.test(t)) return true;
+      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
       const { html, hrefs } = getCombinedItemSig(box);
       for (const h of hrefs) {
@@ -3592,26 +3551,8 @@ function buildAdvanceToNextUnitOrBackScript(
           scanOrder.push(i);
         }
 
-        // Pass 1: Prioritize next unfinished video in course
-        if (config.enableVideo) {
-          for (const i of scanOrder) {
-            const item = navItems[i];
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text || isAiBoxDone(item)) continue;
-            if (!isVideoItem(item)) continue;
-            const key = 'ai-nav-' + i + '-' + text.slice(0, 24);
-            const pctAttr = item.getAttribute('data-ykt-leaf-pct');
-            const pctLabel = pctAttr !== null ? ' (当前进度 ' + pctAttr + '%)' : '';
-            item.scrollIntoView({ behavior: 'instant', block: 'center' });
-            const clickTarget = item.querySelector('.leaf-item') || item.firstElementChild || item;
-            if (clickTarget && typeof clickTarget.click === 'function') {
-              clickTarget.click();
-              return { advanced: true, key, message: '切换到下一未完成视频：' + text.slice(0, 28) + pctLabel };
-            }
-          }
-        }
-
-        // Pass 2: Remaining enabled tasks (homework, courseware, discussion)
+        // Sequential chapter progression: advance to the next unfinished enabled unit in natural
+        // catalog order (videos, then the same chapter's discussions/homework, then next chapter).
         for (const i of scanOrder) {
           const item = navItems[i];
           const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
@@ -3633,7 +3574,7 @@ function buildAdvanceToNextUnitOrBackScript(
 
           if (isDiscuss) {
             const leafId = item.getAttribute('data-ykt-leaf-id');
-            let alreadyCommented = isAiBoxDone(item);
+            let alreadyCommented = false;
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
               if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
@@ -3758,7 +3699,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       }
 
       const t = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-      if (/已完成|已读|已提交|100%/.test(t)) return true;
+      if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
 
       const { html, hrefs } = getCombinedItemSig(box);
       for (const h of hrefs) {
@@ -3895,73 +3836,38 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         let firstIncompleteTitle = '';
         let firstIncompleteItem = null;
 
-        // Pass 1: Prioritize core learning materials with progress tracking (video, homework, courseware)
-        // 1a. Videos first:
-        if (config.enableVideo) {
-          for (let i = 0; i < navItems.length; i += 1) {
-            const item = navItems[i];
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
-            if (isVideoItem(item) && !isAiBoxDone(item)) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = item;
-              break;
-            }
+        // Sequential chapter progression: first unfinished enabled unit in natural catalog order
+        // (a chapter's videos, then that chapter's discussions/homework, then the next chapter).
+        for (let i = 0; i < navItems.length; i += 1) {
+          const item = navItems[i];
+          const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
+          if (!text || isAiBoxDone(item)) continue;
+          const isVideo = isVideoItem(item);
+          const isDiscuss = isDiscussItem(item);
+          const isHomework = isHomeworkItem(item);
+          const isCourseware = isCoursewareItem(item);
+          if (
+            (isVideo && !config.enableVideo) ||
+            (isDiscuss && !config.enableDiscussion) ||
+            (isHomework && !config.enableHomework) ||
+            (isCourseware && !config.enableCourseware)
+          ) {
+            continue;
           }
-        }
-
-        // 1b. Homework next:
-        if (firstIncompleteIdx === -1 && config.enableHomework) {
-          for (let i = 0; i < navItems.length; i += 1) {
-            const item = navItems[i];
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
-            if (isHomeworkItem(item) && !isAiBoxDone(item)) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = item;
-              break;
-            }
+          if (!isVideo && !isDiscuss && !isHomework && !isCourseware) continue;
+          if (isDiscuss) {
+            const leafId = item.getAttribute('data-ykt-leaf-id');
+            let alreadyCommented = false;
+            try {
+              const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+              if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
+            } catch {}
+            if (alreadyCommented) continue;
           }
-        }
-
-        // 1c. Courseware next:
-        if (firstIncompleteIdx === -1 && config.enableCourseware) {
-          for (let i = 0; i < navItems.length; i += 1) {
-            const item = navItems[i];
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
-            if (isCoursewareItem(item) && !isAiBoxDone(item)) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = item;
-              break;
-            }
-          }
-        }
-
-        // Pass 2: Fallback to discussion if enabled and not yet completed/commented
-        if (firstIncompleteIdx === -1 && config.enableDiscussion) {
-          for (let i = 0; i < navItems.length; i += 1) {
-            const item = navItems[i];
-            const text = (item.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (!text) continue;
-            if (isDiscussItem(item)) {
-              const leafId = item.getAttribute('data-ykt-leaf-id');
-              let alreadyCommented = isAiBoxDone(item);
-              try {
-                const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-                if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
-              } catch {}
-              if (!alreadyCommented) {
-                firstIncompleteIdx = i;
-                firstIncompleteTitle = text;
-                firstIncompleteItem = item;
-                break;
-              }
-            }
-          }
+          firstIncompleteIdx = i;
+          firstIncompleteTitle = text;
+          firstIncompleteItem = item;
+          break;
         }
 
         if (firstIncompleteIdx === -1) {
@@ -4019,73 +3925,28 @@ export function buildDetectAndJumpToFirstIncompleteScript(
           return false;
         }
 
-        // Pass 1: Prioritize core materials (video first, then homework, then courseware)
-        if (config.enableVideo) {
-          for (let i = 0; i < leaves.length; i += 1) {
-            const leaf = leaves[i];
-            if (isLeafDone(leaf)) continue;
-            const useEl = leaf.querySelector('i svg use, i use');
-            const iconCls = leaf.querySelector('i')?.className || '';
-            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
-            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
-            if (href.includes('shipin') || href.includes('video')) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = leaf;
-              break;
-            }
-          }
-        }
-
-        if (firstIncompleteIdx === -1 && config.enableHomework) {
-          for (let i = 0; i < leaves.length; i += 1) {
-            const leaf = leaves[i];
-            if (isLeafDone(leaf)) continue;
-            const useEl = leaf.querySelector('i svg use, i use');
-            const iconCls = leaf.querySelector('i')?.className || '';
-            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
-            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
-            if (href.includes('zuoye') || href.includes('homework')) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = leaf;
-              break;
-            }
-          }
-        }
-
-        if (firstIncompleteIdx === -1 && config.enableCourseware) {
-          for (let i = 0; i < leaves.length; i += 1) {
-            const leaf = leaves[i];
-            if (isLeafDone(leaf)) continue;
-            const useEl = leaf.querySelector('i svg use, i use');
-            const iconCls = leaf.querySelector('i')?.className || '';
-            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
-            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
-            if (href.includes('tuwen') || href.includes('kejian') || href.includes('courseware')) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = leaf;
-              break;
-            }
-          }
-        }
-
-        // Pass 2: Fallback to discussion if enabled
-        if (firstIncompleteIdx === -1 && config.enableDiscussion) {
-          for (let i = 0; i < leaves.length; i += 1) {
-            const leaf = leaves[i];
-            if (isLeafDone(leaf)) continue;
-            const useEl = leaf.querySelector('i svg use, i use');
-            const iconCls = leaf.querySelector('i')?.className || '';
-            const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
-            const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
-            if (href.includes('taolun') || href.includes('discuss')) {
-              firstIncompleteIdx = i;
-              firstIncompleteTitle = text;
-              firstIncompleteItem = leaf;
-              break;
-            }
+        // Sequential chapter progression: first unfinished enabled leaf in catalog order
+        for (let i = 0; i < leaves.length; i += 1) {
+          const leaf = leaves[i];
+          if (isLeafDone(leaf)) continue;
+          const useEl = leaf.querySelector('i svg use, i use');
+          const iconCls = leaf.querySelector('i')?.className || '';
+          const href = ((useEl ? (useEl.getAttribute('xlink:href') || useEl.getAttribute('href') || '') : '') + ' ' + iconCls).toLowerCase();
+          const text = (leaf.querySelector('.title')?.textContent || ('第' + (i + 1) + '节')).replace(/\\s+/g, ' ').trim();
+          const isVideo = href.includes('shipin') || href.includes('video');
+          const isHomework = href.includes('zuoye') || href.includes('homework');
+          const isCourseware = href.includes('tuwen') || href.includes('kejian') || href.includes('courseware');
+          const isDiscuss = href.includes('taolun') || href.includes('discuss');
+          if (
+            (isVideo && config.enableVideo) ||
+            (isHomework && config.enableHomework) ||
+            (isCourseware && config.enableCourseware) ||
+            (isDiscuss && config.enableDiscussion)
+          ) {
+            firstIncompleteIdx = i;
+            firstIncompleteTitle = text;
+            firstIncompleteItem = leaf;
+            break;
           }
         }
 

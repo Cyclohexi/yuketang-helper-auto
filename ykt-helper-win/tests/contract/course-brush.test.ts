@@ -409,7 +409,7 @@ describe('CourseBrushController', () => {
     expect(confirmLog?.level).toBe('info');
   });
 
-  it('buildDetectAndJumpToFirstIncompleteScript prioritizes uncompleted video/homework over discussions', () => {
+  it('buildDetectAndJumpToFirstIncompleteScript scans units in catalog order (chapter discussions included)', () => {
     const script = buildDetectAndJumpToFirstIncompleteScript({
       enableVideo: true,
       enableCourseware: true,
@@ -419,8 +419,8 @@ describe('CourseBrushController', () => {
       muteAudio: true,
       autoSubmitHomework: true,
     });
-    expect(script).toContain('Pass 1: Prioritize core learning materials');
-    expect(script).toContain('Pass 2: Fallback to discussion if enabled');
+    expect(script).toContain('Sequential chapter progression');
+    expect(script).not.toContain('Pass 1: Prioritize core learning materials');
     expect(script).toContain('__ykt_commented_discussions');
   });
 
@@ -550,12 +550,14 @@ describe('CourseBrushController', () => {
     expect(script).toContain('xlink:href');
     expect(script).toContain('__ykt_completed_units');
     expect(script).toContain('leaf-999');
-    expect(script).toContain('Pass 1: Prioritize core learning materials');
-    expect(script).toContain('Pass 2: Fallback to discussion if enabled');
+    expect(script).toContain('Sequential chapter progression');
+    expect(script).toContain('已发表');
+    expect(script).toContain('__ykt_commented_discussions');
+    expect(script).not.toContain('Pass 2: Fallback to discussion');
     expect(script).toContain('/c27/online_courseware/schedule/course/progress/?classroom_id=');
   });
 
-  it('buildTriggerNextDirectoryItemScript strictly prioritizes uncompleted videos and never clicks discussions when videos remain', () => {
+  it('buildTriggerNextDirectoryItemScript follows catalog order so chapter discussions are not skipped', () => {
     const script = buildTriggerNextDirectoryItemScript(
       'v2-student-log',
       {
@@ -570,11 +572,9 @@ describe('CourseBrushController', () => {
       [],
     );
 
-    // Verify multi-pass prioritized candidate resolution
-    expect(script).toContain('Pass 1: Video Priority');
-    expect(script).toContain('Pass 5: Discussion Priority');
-    expect(script).toContain('candidates.find((c) => c.kind === \'video\')');
-    expect(script).toContain('candidates.find((c) => c.kind === \'discuss\')');
+    expect(script).toContain('Sequential progression across all candidates in chapter order');
+    expect(script).not.toContain('Pass 1: Video Priority');
+    expect(script).toContain("c.kind === 'discuss' && !config.enableDiscussion");
   });
 });
 
