@@ -3420,139 +3420,58 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
             return { action: 'done', message: '当前讨论单元已发言过，无需重复发言，直接跳过' };
           }
 
-          function extractDiscussionTopic() {
+          function getPreviousClassmateComment() {
             try {
-              const topicCandidates = [
-                activeLeafText,
-                (doc.querySelector('.topic-title, .discuss-title, .title-box .title, .subject-title, [class*="topic-title"], [class*="discuss-title"], h1, h2, h3')?.textContent || ''),
-                (doc.querySelector('.topic-detail, .topic-desc, .discuss-desc, [class*="topic-desc"], [class*="topic-content"]')?.textContent || ''),
-                document.title || ''
-              ];
-              for (const raw of topicCandidates) {
-                let t = String(raw || '').replace(/\\s+/g, ' ').trim();
-                t = t.replace(/^(?:\[[^\]]+\]|【[^】]+】)\s*/, '');
-                t = t.replace(/^(?:讨论|话题|讨论区|课堂讨论|第\S+讲|第\S+章|第\S+节)\s*[:：\-—]?\s*/i, '');
-                t = t.replace(/\s*[-_—·].*$/, '');
-                t = t.replace(/^(?:请同学们?|结合本讲|请大家|思考题|作业|练习)[:：]?\s*/, '');
-                t = t.trim();
-                if (t.length >= 2 && t.length <= 40 && !/雨课堂|学堂在线|workspace|lms|class/i.test(t)) {
+              const commentContainers = Array.from(
+                doc.querySelectorAll(
+                  '#new_discuss .new_discuss_list li, .discuss-list .discuss-item, .discuss-list .comment-item, [class*="comment-list"] [class*="item"], [class*="reply-list"] [class*="item"], [class*="discuss-list"] [class*="item"], .new_discuss_list .list_item, .discuss-item, .comment-item, .reply-item'
+                )
+              );
+
+              for (const container of commentContainers) {
+                if (
+                  container.querySelector('.my-comment, .is-me, [class*="author-me"], [class*="del"], [class*="delete"]') ||
+                  container.classList?.contains('my-comment') ||
+                  container.classList?.contains('is-me')
+                ) {
+                  continue;
+                }
+                const contentEl =
+                  container.querySelector('.cont_detail, .comment-content, .content, .text, .comment-text, [class*="content"], p') ||
+                  container;
+                const t = (contentEl.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (
+                  t.length >= 2 &&
+                  t.length <= 260 &&
+                  !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
+                  !/^\\d+$/.test(t) &&
+                  !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论|赞\\s*\\d*/.test(t)
+                ) {
+                  return t;
+                }
+              }
+
+              const rawList = Array.from(
+                doc.querySelectorAll(
+                  '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, .comment-item .content, .reply-item .content, [class*="comment"] [class*="content"]'
+                )
+              );
+              for (const el of rawList) {
+                if (el.closest('.my-comment, .is-me, [class*="author-me"], .topic-header, .topic-title, .topic-desc')) continue;
+                const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (
+                  t.length >= 2 &&
+                  t.length <= 260 &&
+                  !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
+                  !/^\\d+$/.test(t) &&
+                  !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论|赞\\s*\\d*/.test(t)
+                ) {
                   return t;
                 }
               }
             } catch {}
-            return '';
-          }
 
-          function getOrGenerateComment() {
-            let lastPosted = '';
-            try {
-              lastPosted = String(localStorage.getItem('__ykt_last_comment_text') || '').trim();
-            } catch {}
-
-            const ownCommentHistory = [];
-            try {
-              const hist = JSON.parse(localStorage.getItem('__ykt_commented_texts') || '[]');
-              if (Array.isArray(hist)) ownCommentHistory.push(...hist.map(String));
-            } catch {}
-
-            const discussSelectors = [
-              '#new_discuss .new_discuss_list .cont_detail',
-              '.discuss-list .comment-content',
-              '.cont_detail.word-break',
-              '.comment-item .content',
-              '.comment-item .text',
-              '.comment-body',
-              '.reply-item .content',
-              '.reply-content',
-              '.post-item .content',
-              '[class*="comment-item"] [class*="content"]',
-              '[class*="comment"] [class*="detail"]',
-              '[class*="comment"] [class*="body"]',
-              '[class*="discuss-item"] [class*="content"]',
-              '[class*="reply"] [class*="content"]',
-              '[class*="comment"] p',
-              '[class*="discuss"] p',
-              '[class*="reply"] p'
-            ].join(', ');
-
-            const rawCandidates = Array.from(doc.querySelectorAll(discussSelectors));
-            const validStudentComments = [];
-            const seenTexts = new Set();
-
-            for (const el of rawCandidates) {
-              if (el.closest('.my-comment, .is-me, [class*="author-me"], .topic-header, .topic-title, .topic-desc')) continue;
-              const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
-              if (
-                t.length >= 4 &&
-                t.length <= 160 &&
-                !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
-                !/^\\d+$/.test(t) &&
-                !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论|请结合|请谈谈|请问大家|发帖|回帖|赞\\s*\\d*/.test(t) &&
-                t !== lastPosted &&
-                !ownCommentHistory.includes(t) &&
-                !seenTexts.has(t)
-              ) {
-                seenTexts.add(t);
-                validStudentComments.push(t);
-              }
-            }
-
-            if (validStudentComments.length > 0) {
-              const pickPool = validStudentComments.slice(0, Math.min(validStudentComments.length, 6));
-              const chosen = pickPool[Math.floor(Math.random() * pickPool.length)];
-              try {
-                localStorage.setItem('__ykt_last_comment_text', chosen);
-                ownCommentHistory.push(chosen);
-                if (ownCommentHistory.length > 50) ownCommentHistory.shift();
-                localStorage.setItem('__ykt_commented_texts', JSON.stringify(ownCommentHistory));
-              } catch {}
-              return chosen;
-            }
-
-            const rawTopic = extractDiscussionTopic();
-            const cleanTopic = rawTopic ? rawTopic.replace(/^(?:关于|对)\s*/, '') : '';
-            const topicTemplates = [
-              '认真学习了本节内容，对' + cleanTopic + '有了更深入的理解，很有启发！',
-              '本章节针对' + cleanTopic + '的讲解非常清晰透彻，重难点突出。',
-              '通过对' + cleanTopic + '的学习，进一步理清了知识框架，非常有帮助！',
-              '老师讲解的' + cleanTopic + '深入浅出，结合课件学习解开了不少之前的疑惑。',
-              '打卡学习！关于' + cleanTopic + '这部分内容讲得很详尽，受益良多。',
-              '非常赞同大家的观点，针对' + cleanTopic + '确实需要结合实际多思考和总结。',
-              '本单元重点分析了' + cleanTopic + '，逻辑严密，为后续章节打下了良好基础。',
-              '认真观看了本节视频和课件，对' + cleanTopic + '的概念理解得更扎实了。',
-              '很有收获的一讲，特别是' + cleanTopic + '的剖析，思路很清晰，继续加油！',
-              '学习完' + cleanTopic + '这一节，感觉对整体知识脉络的把握更系统了，打卡完成！'
-            ];
-
-            const generalTemplates = [
-              '认真完成本章节学习，老师讲解逻辑清晰，收获满满！',
-              '打卡学习！本节内容干货很多，重难点剖析透彻，收获颇丰。',
-              '本讲内容系统详实，讲解非常透彻，对后续学习很有启发。',
-              '老师讲得很细致，由浅入深，重难点一目了然，受益良多。',
-              '结合课件和讲解认真梳理了一遍，知识点理解更深入了，打卡！',
-              '内容很充实，配合例题思考起来非常直观，继续保持学习进度。',
-              '本节梳理得非常清晰，结构严谨，对整体知识框架有了更系统的认识。',
-              '打卡完成！课程讲解通俗易懂，重点突出，很有帮助。',
-              '通过本小节的学习，巩固了基础概念，思路更加清晰明朗。',
-              '非常实用的一节课，老师的讲解由表及里，受益匪浅！'
-            ];
-
-            const pool = (cleanTopic && cleanTopic.length >= 2 && cleanTopic.length <= 35)
-              ? topicTemplates
-              : generalTemplates;
-
-            const available = pool.filter((c) => c !== lastPosted && !ownCommentHistory.includes(c));
-            const finalPool = available.length > 0 ? available : pool;
-            const chosen = finalPool[Math.floor(Math.random() * finalPool.length)];
-
-            try {
-              localStorage.setItem('__ykt_last_comment_text', chosen);
-              ownCommentHistory.push(chosen);
-              if (ownCommentHistory.length > 50) ownCommentHistory.shift();
-              localStorage.setItem('__ykt_commented_texts', JSON.stringify(ownCommentHistory));
-            } catch {}
-
-            return chosen;
+            return '打卡学习，认真完成本节课程！';
           }
 
           let inputEl = doc.querySelector(
@@ -3598,7 +3517,7 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
           }
 
           if (inputEl) {
-            const text = getOrGenerateComment();
+            const text = getPreviousClassmateComment();
             try {
               inputEl.focus();
               try {
