@@ -29,15 +29,21 @@
 
 ## 简介
 
-> Latest Version：2.0.0-preview 20260906
+> Latest Version：2.1.0-preview 20261018
 
-[雨课堂助手](https://github.com/hotwords123/yuketang-helper.git)的最新修改版本，为您的雨课堂学习提供各类模型服务。在阅读[证书](LICENSE)（MIT LICENSE）后，你可以自由对本项目进行使用或开发。
+本项目基于 [ZaytsevZY/yuketang-helper-auto](https://github.com/ZaytsevZY/yuketang-helper-auto) 进行二次开发与功能增强。在保留原项目完备的 Electron 桌面客户端架构与课堂监控功能的基础上，集成了**全自动智能刷课流水线**、**章节自动顺序定位**、**课件自动翻页**、**讨论区智能互动**以及**基于大模型的视觉答题支持**。
 
-- 本项目仅供学习参考，建议独立思考解决问题
-
-- 本项目可能会产生API使用费用，请注意消费
-
+- 本项目仅供技术学习与逆向研究参考，建议独立思考解决问题
+- 本项目可能会产生 API 使用费用，请注意消费
 - 本项目不会线上存储用户的任何个人信息或其他敏感信息
+
+### 🌟 本分支新增特性与改进
+
+1. **智能目录扫描与免缓存精确定位**：进入课程后自动分析章节树与未完成项，直接跳转至首个待学习单元（讨论、视频或作业），无需依赖旧版易失效的本地缓存。
+2. **原生视频倍速防抖与锁定**：重构 Electron 页面注入逻辑，锁定 `playbackRate` 属性并拦截页面自身频繁重置倍速的死循环，稳定维持所配置倍速。
+3. **讨论区智能跟帖互动**：自动检测讨论单元，提取同班同学优质评论并填充至输入框，支持富文本 contenteditable 及回车自动提交，杜绝千篇一律与漏刷。
+4. **作业多模态视觉答题 (Vision AI)**：针对加密字体与复杂题型，支持原生截图直接交由多模态视觉模型解答并自动填入。
+5. **全链路自动化契约测试**：为所有动态注入的浏览器脚本增加了 Vitest 语法编译与执行测试，杜绝运行时报错。
 
 ## Quick Start
 
@@ -133,13 +139,26 @@ npm run cli -- answer propose <problem-id>
 
 ykt-cli 是适用于 agent 的超轻量工具，我们欢迎在 ykt-cli 中实现新功能。
 
-## 推荐项目
+## 致谢与参考 (Acknowledgments)
 
-- 项目灵感来自于：[雨课堂助手](https://github.com/hotwords123/yuketang-helper.git)，本项目已兼容`ykt-helper v1.5.1`。
+本项目在开发过程中深度复用并参考了以下优秀开源项目的成果与思路，特此向原作者们致以诚挚的感谢：
 
-- 项目兼容：[清华大学荷塘雨课堂助手-AI版](https://github.com/DragonAura/THU-Yuketang-Helper-AI)，但是不建议同时使用2种AI答题。
+1. **[ZaytsevZY/yuketang-helper-auto](https://github.com/ZaytsevZY/yuketang-helper-auto)**
+   - 感谢原作者开源的桌面客户端架构底座，提供了 Electron 桌面工程体系、雨课堂 WebSocket 旁路监听、作业/考试详情还原以及加密字体解析的基础。
+2. **[Niuwh/yuketang-jiaoben](https://github.com/Niuwh/yuketang-jiaoben)**
+   - 感谢作者“风之子”开源的雨课堂刷课助手油猴脚本，为本项目的课程刷课自动化逻辑、PPT 翻页判定、讨论区互动交互及 DOM 选择器适配提供了宝贵的参考与启发。
+3. **[hotwords123/yuketang-helper](https://github.com/hotwords123/yuketang-helper)**
+   - 感谢雨课堂助手扩展的早期奠基工作，本项目已兼容其扩展能力。
+4. **[OneTHU](https://github.com/smartThise/OneTHU)**
+   - 感谢社区早期对清华雨课堂接口协议反向工程的探索。
 
-- 项目兼容：[雨课堂考试助手](https://github.com/soundstarrain/yuketang-assistant)，如果有考试测试需要，请移步该项目。我们不同意任何使用 LLM 的作弊行为。
+---
+
+## 免责声明 (Disclaimer)
+
+1. 本项目仅供前端逆向工程、Electron 桌面应用架构、自动化测试及 AI 视觉辅助等学术与技术研究交流使用。
+2. 严禁将本项目用于任何违背学术诚信、学校管理规章制度的行为，严禁用于任何商业牟利或恶意用途。
+3. 任何个人或组织使用本项目所产生的一切直接或间接后果，均由使用者自行承担，本项目及贡献者不承担任何法律或连带责任。
 
 ---
 
