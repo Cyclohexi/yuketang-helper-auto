@@ -45,13 +45,23 @@
 4. **作业多模态视觉答题 (Vision AI)**：针对加密字体与复杂题型，支持原生截图直接交由多模态视觉模型解答并自动填入。
 5. **全链路自动化契约测试**：为所有动态注入的浏览器脚本增加了 Vitest 语法编译与执行测试，杜绝运行时报错。
 
-## Quick Start
+## 快速开始 (Quick Start)
 
-- 安装 [Node.js](https://nodejs.org/en) 24.x 和 npm 11.x。
+### 方式一：下载 Windows 一键安装程序 (推荐普通用户)
+> 💡 **无需安装 Node.js、npm 或 Git**，下载即用。
 
+前往 [Releases 页面](https://github.com/Cyclohexi/yuketang-helper-auto/releases) 下载最新发行版：
+- 📦 **一键安装包**：下载 `YuketangHelper-Setup.exe`，双击全自动安装并创建桌面快捷方式。
+- 🗂️ **绿色免安装版**：下载 `YuketangHelper-Portable.zip`，解压后双击 `雨课堂助手.exe` 直接运行。
+
+### 方式二：下载源码一键启动
+如果你下载了源码压缩包或克隆了本仓库：
+- 双击根目录下的 **`一键启动雨课堂助手.bat`** 即可自动运行，无需敲击任何命令。
+
+### 方式三：开发者手动编译与开发模式
+如果你是开发者并需要二次开发或调试：
 ```sh
-git clone https://github.com/ZaytsevZY/yuketang-helper-auto.git
-cd yuketang-helper-auto/ykt-helper-win
+cd ykt-helper-win
 npm ci --include=dev --include=optional
 npm run build
 npm start
