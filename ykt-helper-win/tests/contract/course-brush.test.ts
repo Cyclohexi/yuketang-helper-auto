@@ -6,7 +6,9 @@ import type {
 } from '@ykt/contracts';
 import {
   CourseBrushController,
+  buildAdvanceToNextUnitOrBackScript,
   buildDetectAndJumpToFirstIncompleteScript,
+  buildHandleContentExtraTaskScript,
   buildTriggerNextDirectoryItemScript,
   parseCourseBrushAiAnswer,
 } from '../../apps/desktop/main/course-brush-controller.js';
@@ -576,5 +578,47 @@ describe('CourseBrushController', () => {
     expect(script).not.toContain('Pass 1: Video Priority');
     expect(script).toContain("c.kind === 'discuss' && !config.enableDiscussion");
   });
+
+  it('buildAdvanceToNextUnitOrBackScript embeds ordered progress mapping and does not use icon signature heuristics', () => {
+    const script = buildAdvanceToNextUnitOrBackScript(
+      {
+        enableVideo: true,
+        enableCourseware: true,
+        enableDiscussion: true,
+        enableHomework: true,
+        playbackRate: 2,
+        muteAudio: true,
+        autoSubmitHomework: true,
+      },
+      ['key-1'],
+      ['leaf-49460146'],
+    );
+
+    expect(script).toContain('yktCleanTitle');
+    expect(script).toContain('yktApplyOrderedProgress');
+    expect(script).toContain('data-ykt-leaf-done');
+    expect(script).toContain('leaf-49460146');
+    expect(script).not.toContain('getRightSidebarIconSig');
+    expect(script).not.toContain('__yktCompletedSidebarIconSig');
+  });
+
+  it('buildHandleContentExtraTaskScript supports contenteditable and strict leaf ID commented tracking', () => {
+    const script = buildHandleContentExtraTaskScript({
+      enableVideo: true,
+      enableCourseware: true,
+      enableDiscussion: true,
+      enableHomework: true,
+      playbackRate: 2,
+      muteAudio: true,
+      autoSubmitHomework: true,
+    });
+
+    expect(script).toContain('contenteditable');
+    expect(script).toContain('markDiscussDoneInStorage');
+    expect(script).toContain('__ykt_commented_discussions');
+    expect(script).toContain('hasUserAlreadyCommentedInPage');
+    expect(script).toContain('正在等待讨论区评论输入框加载');
+  });
 });
+
 

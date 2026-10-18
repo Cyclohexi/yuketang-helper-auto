@@ -66,7 +66,12 @@ export class CourseBrushController {
             const arr = JSON.parse(data);
             if (Array.isArray(arr)) {
               for (const k of arr) {
-                if (typeof k === 'string' && k) this.#completedLeafKeys.add(k);
+                if (
+                  typeof k === 'string' &&
+                  (k.startsWith('http') || /^\d{4,}$/.test(k))
+                ) {
+                  this.#completedLeafKeys.add(k);
+                }
               }
             }
           })
@@ -770,8 +775,65 @@ export class CourseBrushController {
       this.#lastMediaProgress = '';
     }
 
+    const isDiscussUnit = Boolean(
+      probe.url.includes('/forum/') ||
+        probe.url.includes('/discuss/') ||
+        probe.url.includes('/discussion/') ||
+        probe.routeLabel.includes('讨论') ||
+        probe.title.includes('讨论') ||
+        probe.title.includes('[讨论]'),
+    );
+
+    // Case Discussion: Dedicated discussion unit handling (never skipped by mediaStatus.completed)
+    if (isDiscussUnit) {
+      if (!this.#config.enableDiscussion) {
+        this.log('info', '⏭️ 已关闭讨论区刷课，跳过当前讨论单元');
+        return true;
+      }
+      this.#mediaWaitTicks = 0;
+      this.#mediaStuckTicks = 0;
+      this.#lastMediaProgress = '';
+
+      const extraResult = (await this.browser.webContents.executeJavaScript(
+        buildHandleContentExtraTaskScript(this.#config),
+        true,
+      )) as {
+        action: 'done' | 'waiting' | 'none';
+        message: string;
+      };
+
+      if (extraResult.action === 'waiting') {
+        this.#currentTaskTitle = extraResult.message;
+        this.log('info', `⏳ ${extraResult.message}`);
+        this.emitState();
+        await this.sleep(2000);
+        return false;
+      }
+
+      if (extraResult.action === 'done') {
+        this.log('success', `✅ ${extraResult.message}`);
+        await this.markCurrentUnitCompleted(probe);
+        return true;
+      }
+
+      const discussWait = (this.#unitReloadAttempts.get(probe.url) ?? 0) + 1;
+      this.#unitReloadAttempts.set(probe.url, discussWait);
+      if (discussWait <= 3) {
+        this.#currentTaskTitle = `正在等待讨论区加载 (${discussWait}/3)…：${probe.title}`;
+        this.emitState();
+        await this.sleep(1500);
+        return false;
+      }
+
+      this.#unitReloadAttempts.delete(probe.url);
+      this.log('warn', `⚠️ 讨论区未找到评论输入框或已无需发言：${probe.title}`);
+      await this.markCurrentUnitCompleted(probe);
+      return true;
+    }
+
     const isMediaUnit =
-      probe.route === 'ai-workspace'
+      !isDiscussUnit &&
+      (probe.route === 'ai-workspace'
         ? Boolean(
             probe.routeLabel.includes('视频') ||
               probe.routeLabel.includes('音频') ||
@@ -785,7 +847,7 @@ export class CourseBrushController {
               probe.routeLabel.includes('视频') ||
               probe.routeLabel.includes('音频') ||
               probe.url.includes('/video-student/'),
-          );
+          ));
 
     if (probe.mediaStatus.completed) {
       this.#mediaWaitTicks = 0;
@@ -1189,14 +1251,7 @@ export class CourseBrushController {
         /\/ai-workspace\/lms-graph\/(\d+)\/([^/?#]+)\/(\d+)/i,
       ) || probe.url.match(/node_id=(\d+)/i);
     const leafId = m && m[3] ? m[3] : m && m[1] ? m[1] : '';
-    if (leafId) keys.push(leafId);
-    if (probe.title) {
-      const clean = probe.title
-        .replace(/^视频|^音频|^课件|^作业|^讨论/g, '')
-        .replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '')
-        .toLowerCase();
-      if (clean.length >= 3) keys.push(clean);
-    }
+    if (leafId && /^\d+$/.test(leafId)) keys.push(leafId);
 
     for (const k of keys) {
       this.#completedLeafKeys.add(k);
@@ -1567,8 +1622,71 @@ export function parseCourseBrushAiAnswer(
   };
 }
 
+/**
+ * Maps the server progress list onto sidebar leaf boxes strictly in catalog order.
+ * Every chapter can have units with identical titles (e.g. "讨论一"), so a global
+ * fuzzy title search maps later chapters onto chapter 1's completed entries. We walk
+ * both lists with a forward-only pointer so each server entry is consumed once.
+ */
+const ORDERED_PROGRESS_MAPPING_JS = String.raw`
+    function yktCleanTitle(s) {
+      let t = String(s || '').trim();
+      t = t.replace(/^(?:\[[^\]]+\]|【[^】]+】)\s*/, '');
+      t = t.replace(/^(?:视频|音频|课件|文档|作业|练习|测验|讨论|图文)\s+/i, '');
+      t = t.replace(/^(视频|音频|课件|文档|作业|练习|测验|讨论|图文)\1/i, '$1');
+      return t.replace(/[\s\-_—·:：/\\()[\]{}【】（）]/g, '').toLowerCase();
+    }
+    function yktApplyOrderedProgress(boxes, list) {
+      if (!boxes || !list || !Array.isArray(list) || list.length === 0) return;
+      const boxArr = Array.from(boxes);
+      if (boxArr.length === 0) return;
+
+      // 1. Direct 1-to-1 mapping if counts match exactly
+      if (boxArr.length === list.length) {
+        for (let i = 0; i < boxArr.length; i += 1) {
+          const box = boxArr[i];
+          const m = list[i];
+          if (!box || !m) continue;
+          box.setAttribute('data-ykt-leaf-id', String(m.id));
+          if (m.leafType !== undefined) box.setAttribute('data-ykt-leaf-type', String(m.leafType));
+          const pct = Math.min(100, Math.max(0, Math.round((m.progress || 0) * 100)));
+          box.setAttribute('data-ykt-leaf-pct', String(pct));
+          if ((m.progress || 0) >= 0.995) box.setAttribute('data-ykt-leaf-done', 'true');
+          else box.removeAttribute('data-ykt-leaf-done');
+        }
+        return;
+      }
+
+      // 2. Strict sequential forward pointer matching if counts differ
+      let ptr = 0;
+      for (const box of boxArr) {
+        const nb = yktCleanTitle(box.textContent);
+        if (!nb) continue;
+        let hit = -1;
+        for (let j = ptr; j < list.length; j += 1) {
+          const n = yktCleanTitle(list[j].name);
+          if (!n) continue;
+          if (n === nb || (nb.length >= 4 && n.includes(nb)) || (n.length >= 4 && nb.includes(n))) {
+            hit = j;
+            break;
+          }
+        }
+        if (hit === -1) continue;
+        ptr = hit + 1;
+        const m = list[hit];
+        box.setAttribute('data-ykt-leaf-id', String(m.id));
+        if (m.leafType !== undefined) box.setAttribute('data-ykt-leaf-type', String(m.leafType));
+        const pct = Math.min(100, Math.max(0, Math.round((m.progress || 0) * 100)));
+        box.setAttribute('data-ykt-leaf-pct', String(pct));
+        if ((m.progress || 0) >= 0.995) box.setAttribute('data-ykt-leaf-done', 'true');
+        else box.removeAttribute('data-ykt-leaf-done');
+      }
+    }
+`;
+
 function buildDomProbeScript(): string {
   return `(async () => {
+${ORDERED_PROGRESS_MAPPING_JS}
     const url = location.href;
     let title = document.title || '';
 
@@ -1699,53 +1817,10 @@ function buildDomProbeScript(): string {
         } catch {}
       }
 
-      function normalizeStr(s) {
-        return String(s || '').toLowerCase().replace(/^(?:\[?视频\]?|\[?音频\]?|\[?课件\]?|\[?作业\]?|\[?讨论\]?)/g, '').replace(/[^a-z0-9\u4e00-\u9fa5]/g, '');
-      }
-
       const activeCache = window.__yktProgressCache;
       if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
-        const navBoxes = queryAllDocs('.nav-item-leaf-box').filter(isVisible);
-        const list = activeCache.list;
-        for (let i = 0; i < navBoxes.length; i += 1) {
-          const box = navBoxes[i];
-          const boxText = (box.textContent || '').replace(/\s+/g, ' ').trim();
-          const normBox = normalizeStr(boxText);
-          let matched = null;
-          if (list[i]) {
-            const normList = normalizeStr(list[i].name);
-            if (normBox && normList && (normBox.includes(normList.slice(0, 6)) || normList.includes(normBox.slice(0, 6)))) {
-              matched = list[i];
-            }
-          }
-          if (!matched) {
-            matched = list.find((it) => {
-              const n = normalizeStr(it.name);
-              return n && normBox && (normBox.includes(n.slice(0, 6)) || n.includes(normBox.slice(0, 6)));
-            });
-          }
-          if (matched) {
-            const pct = Math.min(100, Math.max(0, Math.round((matched.progress || 0) * 100)));
-            const isDone = (matched.progress || 0) >= 0.995;
-            box.setAttribute('data-ykt-leaf-id', matched.id);
-            box.setAttribute('data-ykt-leaf-pct', String(pct));
-            if (isDone) box.setAttribute('data-ykt-leaf-done', 'true');
-          }
-        }
+        yktApplyOrderedProgress(queryAllDocs('.nav-item-leaf-box'), activeCache.list);
       }
-    }
-
-    function getRightSidebarIconSig(box) {
-      if (!box || !box.querySelectorAll) return '';
-      const svgs = Array.from(box.querySelectorAll('svg'));
-      if (svgs.length === 0) return '';
-      const boxRect = box.getBoundingClientRect();
-      const lastSvg = svgs[svgs.length - 1];
-      const svgRect = lastSvg.getBoundingClientRect();
-      if (svgs.length >= 2 || (boxRect.width > 60 && svgRect.left > boxRect.left + boxRect.width * 0.55)) {
-        return (lastSvg.innerHTML || '').replace(/\s+/g, ' ').trim();
-      }
-      return '';
     }
 
     function isAiWorkspaceCurrentUnitCompleted() {
@@ -1782,12 +1857,6 @@ function buildDomProbeScript(): string {
     }
 
     const aiUnitCompleted = isAiWorkspaceCurrentUnitCompleted();
-    if (aiUnitCompleted && activeLeafBox) {
-      const sig = getRightSidebarIconSig(activeLeafBox);
-      if (sig) {
-        window.__yktCompletedSidebarIconSig = sig;
-      }
-    }
 
     function isAiBoxDone(box) {
       if (!box) return false;
@@ -1831,22 +1900,16 @@ function buildDomProbeScript(): string {
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
         if (Array.isArray(completedStorage) && completedStorage.length > 0) {
           if (leafId && completedStorage.includes(leafId)) return true;
-          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '').toLowerCase();
-          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
         }
       } catch {}
 
       try {
         const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
         if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
-          if (leafId && commentedStorage.some((k) => String(k).includes(leafId))) return true;
+          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
         }
       } catch {}
 
-      const sig = getRightSidebarIconSig(box);
-      if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
-        return true;
-      }
       return false;
     }
 
@@ -2746,6 +2809,23 @@ function buildEnsureMediaAndAntiCheckScript(config: CourseBrushConfig): string {
       const rate = Number(${JSON.stringify(config.playbackRate)}) || 2;
       const mute = Boolean(${JSON.stringify(config.muteAudio)});
 
+      try {
+        const rawCompleted = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
+        if (Array.isArray(rawCompleted)) {
+          const sanitized = rawCompleted.filter((k) => typeof k === 'string' && (k.startsWith('http') || /^\d{4,}$/.test(k)));
+          if (sanitized.length !== rawCompleted.length) {
+            localStorage.setItem('__ykt_completed_units', JSON.stringify(sanitized));
+          }
+        }
+        const rawCommented = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(rawCommented)) {
+          const sanitized = rawCommented.filter((k) => typeof k === 'string' && (k.startsWith('http') || /^\d{4,}$/.test(k)));
+          if (sanitized.length !== rawCommented.length) {
+            localStorage.setItem('__ykt_commented_discussions', JSON.stringify(sanitized));
+          }
+        }
+      } catch {}
+
       const docs = [document];
       for (const ifr of Array.from(document.querySelectorAll('iframe'))) {
         try {
@@ -3195,7 +3275,7 @@ function buildCheckAndRunV2InlineTaskScript(
   })()`;
 }
 
-function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
+export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
   return `(async () => {
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const config = ${JSON.stringify(config)};
@@ -3278,7 +3358,7 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
       }
 
       // Discussion unit handling (only on dedicated discussion pages or #new_discuss, never on video pages)
-      if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss'))) {
+      if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss, .publish_discuss, .discuss-list'))) {
         function hasUserAlreadyCommentedInPage(d) {
           const ownActions = Array.from(
             d.querySelectorAll(
@@ -3292,14 +3372,17 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
             return true;
           }
 
-          const myBadges = d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]');
+          const myBadges = Array.from(d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]'));
           if (myBadges.length > 0) return true;
 
           try {
             const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-            const curPath = location.pathname;
-            const curHref = location.href;
-            if (stored.some((item) => curPath.includes(item) || curHref.includes(item))) {
+            const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
+            const leafId = leafMatch ? leafMatch[1] : '';
+            if (leafId && stored.some((item) => String(item) === String(leafId))) {
+              return true;
+            }
+            if (stored.includes(location.href)) {
               return true;
             }
           } catch {}
@@ -3310,9 +3393,9 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
         function markDiscussDoneInStorage() {
           try {
             const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-            const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
-            const leafId = leafMatch ? leafMatch[1] : location.pathname;
-            if (!stored.includes(leafId)) {
+            const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
+            const leafId = leafMatch ? leafMatch[1] : '';
+            if (leafId && /^\d+$/.test(leafId) && !stored.includes(leafId)) {
               stored.push(leafId);
               localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
             }
@@ -3331,30 +3414,30 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
           )
         );
         const firstValidComment = discussCandidates
-          .map((el) => (el.textContent || '').replace(/\\s+/g, ' ').trim())
+          .map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim())
           .find(
             (t) =>
               t.length >= 2 &&
               t.length <= 220 &&
-              !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
-              !/^\\d+$/.test(t) &&
-              !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论/.test(t)
+              !/^\d{4}[-/]\d{1,2}/.test(t) &&
+              !/^\d+$/.test(t) &&
+              !/发表你的观点|暂无评论|还没有人发言|Shift\+Enter|全部评论|话题详情|编辑于|条评论/.test(t)
           );
 
-        const textarea = doc.querySelector(
-          'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea'
+        const inputEl = doc.querySelector(
+          'textarea[placeholder*="观点"], textarea[placeholder*="评论"], textarea[placeholder*="讨论"], textarea.el-textarea__inner, .publish_discuss textarea, #new_discuss textarea, .publish_discuss [contenteditable="true"], #new_discuss [contenteditable="true"], [contenteditable="true"], textarea'
         );
         let submitBtn =
-          doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn') ||
-          Array.from(doc.querySelectorAll('button, .el-button')).find((b) =>
-            /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\\s+/g, '').trim())
+          doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn, #new_discuss button[class*="submit"], #new_discuss button[class*="post"]') ||
+          Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"]')).find((b) =>
+            /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\s+/g, '').trim())
           );
 
-        if (!submitBtn && textarea) {
-          const inputWrap = textarea.parentElement?.parentElement || textarea.parentElement;
+        if (!submitBtn && inputEl) {
+          const inputWrap = inputEl.parentElement?.parentElement || inputEl.parentElement;
           if (inputWrap) {
             const enterHint = Array.from(inputWrap.querySelectorAll('span, div')).find(
-              (el) => el.children.length === 0 && /Enter\\s*发送/i.test(el.textContent || '')
+              (el) => el.children.length === 0 && /Enter\s*发送/i.test(el.textContent || '')
             );
             if (enterHint && enterHint.parentElement) {
               submitBtn =
@@ -3365,27 +3448,37 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
           }
         }
 
-        if (textarea && textarea.tagName === 'TEXTAREA') {
+        if (inputEl) {
           const text = firstValidComment || '坚持党的领导，坚定理想信念！';
-          const desc = win.HTMLTextAreaElement ? Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value') : null;
-          textarea.focus();
-          if (desc && desc.set) desc.set.call(textarea, text);
-          else textarea.value = text;
-          textarea.dispatchEvent(new win.Event('input', { bubbles: true }));
-          textarea.dispatchEvent(new win.Event('change', { bubbles: true }));
+          inputEl.focus();
+          if (inputEl.tagName === 'TEXTAREA' || inputEl.tagName === 'INPUT') {
+            const desc = win.HTMLTextAreaElement ? Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value') : null;
+            if (desc && desc.set) desc.set.call(inputEl, text);
+            else inputEl.value = text;
+            inputEl.dispatchEvent(new win.Event('input', { bubbles: true }));
+            inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+          } else {
+            inputEl.innerText = text;
+            inputEl.dispatchEvent(new win.InputEvent('input', { bubbles: true, data: text }));
+            inputEl.dispatchEvent(new win.Event('change', { bubbles: true }));
+          }
           await sleep(450);
           if (submitBtn && typeof submitBtn.click === 'function') {
             submitBtn.click();
           }
           try {
             const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-            textarea.dispatchEvent(new win.KeyboardEvent('keydown', enterOpts));
-            textarea.dispatchEvent(new win.KeyboardEvent('keypress', enterOpts));
-            textarea.dispatchEvent(new win.KeyboardEvent('keyup', enterOpts));
+            inputEl.dispatchEvent(new win.KeyboardEvent('keydown', enterOpts));
+            inputEl.dispatchEvent(new win.KeyboardEvent('keypress', enterOpts));
+            inputEl.dispatchEvent(new win.KeyboardEvent('keyup', enterOpts));
           } catch {}
           markDiscussDoneInStorage();
-          await sleep(1200);
+          await sleep(1500);
           return { action: 'done', message: '讨论区已自动发表评论：' + text.slice(0, 20) };
+        }
+
+        if (isAiDiscussUnit) {
+          return { action: 'waiting', message: '正在等待讨论区评论输入框加载…' };
         }
       }
     }
@@ -3394,12 +3487,13 @@ function buildHandleContentExtraTaskScript(config: CourseBrushConfig): string {
   })()`;
 }
 
-function buildAdvanceToNextUnitOrBackScript(
+export function buildAdvanceToNextUnitOrBackScript(
   config: CourseBrushConfig,
   processedKeys: readonly string[],
   completedKeys: readonly string[] = [],
 ): string {
   return `(() => {
+${ORDERED_PROGRESS_MAPPING_JS}
     const config = ${JSON.stringify(config)};
     const processed = new Set(${JSON.stringify(processedKeys)});
     const completedCache = new Set(${JSON.stringify(completedKeys)});
@@ -3462,19 +3556,6 @@ function buildAdvanceToNextUnitOrBackScript(
       return false;
     }
 
-    function getRightSidebarIconSig(box) {
-      if (!box || !box.querySelectorAll) return '';
-      const svgs = Array.from(box.querySelectorAll('svg'));
-      if (svgs.length === 0) return '';
-      const boxRect = box.getBoundingClientRect();
-      const lastSvg = svgs[svgs.length - 1];
-      const svgRect = lastSvg.getBoundingClientRect();
-      if (svgs.length >= 2 || (boxRect.width > 60 && svgRect.left > boxRect.left + boxRect.width * 0.55)) {
-        return (lastSvg.innerHTML || '').replace(/\\s+/g, ' ').trim();
-      }
-      return '';
-    }
-
     function isAiBoxDone(box) {
       if (!box) return false;
       const attrDone = box.getAttribute('data-ykt-leaf-done');
@@ -3515,15 +3596,16 @@ function buildAdvanceToNextUnitOrBackScript(
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
         if (Array.isArray(completedStorage) && completedStorage.length > 0) {
           if (leafId && completedStorage.includes(leafId)) return true;
-          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5]/g, '').toLowerCase();
-          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
         }
       } catch {}
 
-      const sig = getRightSidebarIconSig(box);
-      if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
-        return true;
-      }
+      try {
+        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
+          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
+        }
+      } catch {}
+
       return false;
     }
 
@@ -3539,6 +3621,11 @@ function buildAdvanceToNextUnitOrBackScript(
       const rawBoxes = Array.from(doc.querySelectorAll('.nav-item-leaf-box'));
       const navItems = rawBoxes.length > 0 ? rawBoxes : Array.from(doc.querySelectorAll('.leaf-item'));
       if (navItems.length > 0) {
+        const activeCache = window.__yktProgressCache;
+        if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
+          yktApplyOrderedProgress(navItems, activeCache.list);
+        }
+
         let activeIdx = navItems.findIndex((el) =>
           /active|current|is-active|selected/i.test((el.className || '') + ' ' + (el.firstElementChild?.className || '')) ||
           Boolean(el.querySelector('.is-active, .active'))
@@ -3577,7 +3664,7 @@ function buildAdvanceToNextUnitOrBackScript(
             let alreadyCommented = false;
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
+              if (leafId && stored.some((id) => String(id) === String(leafId))) alreadyCommented = true;
             } catch {}
             if (alreadyCommented) continue;
           }
@@ -3604,6 +3691,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
   completedKeys: readonly string[] = [],
 ): string {
   return `(async () => {
+${ORDERED_PROGRESS_MAPPING_JS}
     const config = ${JSON.stringify(config)};
     const completedCache = new Set(${JSON.stringify(completedKeys)});
     const docs = [document];
@@ -3671,19 +3759,6 @@ export function buildDetectAndJumpToFirstIncompleteScript(
       return false;
     }
 
-    function getRightSidebarIconSig(box) {
-      if (!box || !box.querySelectorAll) return '';
-      const svgs = Array.from(box.querySelectorAll('svg'));
-      if (svgs.length === 0) return '';
-      const boxRect = box.getBoundingClientRect();
-      const lastSvg = svgs[svgs.length - 1];
-      const svgRect = lastSvg.getBoundingClientRect();
-      if (svgs.length >= 2 || (boxRect.width > 60 && svgRect.left > boxRect.left + boxRect.width * 0.55)) {
-        return (lastSvg.innerHTML || '').replace(/\\s+/g, ' ').trim();
-      }
-      return '';
-    }
-
     function isAiBoxDone(box) {
       if (!box) return false;
       const attrDone = box.getAttribute('data-ykt-leaf-done');
@@ -3724,15 +3799,16 @@ export function buildDetectAndJumpToFirstIncompleteScript(
         const completedStorage = JSON.parse(localStorage.getItem('__ykt_completed_units') || '[]');
         if (Array.isArray(completedStorage) && completedStorage.length > 0) {
           if (leafId && completedStorage.includes(leafId)) return true;
-          const clean = t.replace(/^视频|^音频|^课件|^作业|^讨论/g, '').replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5]/g, '').toLowerCase();
-          if (clean && completedStorage.some(k => k && k.length >= 3 && (k.includes(clean.slice(0, 8)) || clean.includes(k.slice(0, 8))))) return true;
         }
       } catch {}
 
-      const sig = getRightSidebarIconSig(box);
-      if (sig && window.__yktCompletedSidebarIconSig && sig === window.__yktCompletedSidebarIconSig) {
-        return true;
-      }
+      try {
+        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
+          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
+        }
+      } catch {}
+
       return false;
     }
 
@@ -3785,40 +3861,9 @@ export function buildDetectAndJumpToFirstIncompleteScript(
           } catch {}
         }
 
-        function normalizeStr(s) {
-          return String(s || '').toLowerCase().replace(/^(?:\[?视频\]?|\[?音频\]?|\[?课件\]?|\[?作业\]?|\[?讨论\]?)/g, '').replace(/[^a-z0-9\\u4e00-\\u9fa5]/g, '');
-        }
-
         const activeCache = window.__yktProgressCache;
         if (activeCache && Array.isArray(activeCache.list) && activeCache.list.length > 0) {
-          const list = activeCache.list;
-          for (let i = 0; i < navItems.length; i += 1) {
-            const box = navItems[i];
-            if (!box.hasAttribute('data-ykt-leaf-done')) {
-              const boxText = (box.textContent || '').replace(/\\s+/g, ' ').trim();
-              const normBox = normalizeStr(boxText);
-              let matched = null;
-              if (list[i]) {
-                const normList = normalizeStr(list[i].name);
-                if (normBox && normList && (normBox.includes(normList.slice(0, 6)) || normList.includes(normBox.slice(0, 6)))) {
-                  matched = list[i];
-                }
-              }
-              if (!matched) {
-                matched = list.find((it) => {
-                  const n = normalizeStr(it.name);
-                  return n && normBox && (normBox.includes(n.slice(0, 6)) || n.includes(normBox.slice(0, 6)));
-                });
-              }
-              if (matched) {
-                const pct = Math.min(100, Math.max(0, Math.round((matched.progress || 0) * 100)));
-                const isDone = (matched.progress || 0) >= 0.995;
-                box.setAttribute('data-ykt-leaf-id', matched.id);
-                box.setAttribute('data-ykt-leaf-pct', String(pct));
-                if (isDone) box.setAttribute('data-ykt-leaf-done', 'true');
-              }
-            }
-          }
+          yktApplyOrderedProgress(navItems, activeCache.list);
         }
 
         let activeIdx = navItems.findIndex((el) =>
@@ -3860,7 +3905,7 @@ export function buildDetectAndJumpToFirstIncompleteScript(
             let alreadyCommented = false;
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              if (leafId && stored.some((id) => String(id).includes(leafId))) alreadyCommented = true;
+              if (leafId && stored.some((id) => String(id) === String(leafId))) alreadyCommented = true;
             } catch {}
             if (alreadyCommented) continue;
           }
