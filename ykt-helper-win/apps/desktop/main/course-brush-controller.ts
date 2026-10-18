@@ -174,12 +174,24 @@ export class CourseBrushController {
           try {
             localStorage.removeItem('__ykt_completed_units');
             localStorage.removeItem('__ykt_cache');
-            localStorage.removeItem('__ykt_commented_discussions');
           } catch {}
         })()`,
         true,
       )
       .catch(() => null);
+    try {
+      const storedDiscussions = (await this.browser.webContents
+        .executeJavaScript(
+          `JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]')`,
+          true,
+        )
+        .catch(() => [])) as string[];
+      if (Array.isArray(storedDiscussions)) {
+        for (const k of storedDiscussions) {
+          if (k) this.#completedLeafKeys.add(String(k));
+        }
+      }
+    } catch {}
     this.log(
       'info',
       `🚀 启动 Electron 原生自动刷课（当前标签页 ${browserState.activeTabId}）`,
@@ -1669,12 +1681,24 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
         if (Array.isArray(children)) {
           yktWalkProgress(children, list, byId);
         }
-        if (node.id !== undefined && (node.progress !== undefined || node.leaf_type !== undefined || node.completed !== undefined)) {
+        if (node.id !== undefined && (node.progress !== undefined || node.leaf_type !== undefined || node.completed !== undefined || node.status !== undefined)) {
+          const isDone = Boolean(
+            (node.progress !== undefined && Number(node.progress) >= 0.995) ||
+            node.completed === 1 || node.completed === true || node.completed === '1' ||
+            node.status === 1 || node.status === true || node.status === '1' ||
+            node.is_comment === 1 || node.is_comment === true || node.is_comment === '1' ||
+            (node.comment_num !== undefined && Number(node.comment_num) > 0) ||
+            (node.comment_count !== undefined && Number(node.comment_count) > 0) ||
+            (node.score !== undefined && Number(node.score) > 0) ||
+            (node.score_status !== undefined && Number(node.score_status) === 1) ||
+            node.pass === 1 || node.pass === true || node.pass === '1'
+          );
           const item = {
             id: String(node.id),
             name: String(node.name || node.title || '').replace(/\s+/g, ' ').trim(),
             leafType: node.leaf_type,
-            progress: Number(node.progress !== undefined ? node.progress : (node.completed ? 1 : 0)),
+            progress: isDone ? 1 : Number(node.progress || 0),
+            completed: isDone,
           };
           list.push(item);
           byId[item.id] = item;
@@ -1727,7 +1751,7 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
           if (m.leafType !== undefined) box.setAttribute('data-ykt-leaf-type', String(m.leafType));
           const pct = Math.min(100, Math.max(0, Math.round((m.progress || 0) * 100)));
           box.setAttribute('data-ykt-leaf-pct', String(pct));
-          if ((m.progress || 0) >= 0.995) box.setAttribute('data-ykt-leaf-done', 'true');
+          if ((m.progress || 0) >= 0.995 || m.completed) box.setAttribute('data-ykt-leaf-done', 'true');
           else box.removeAttribute('data-ykt-leaf-done');
         }
         return;
@@ -1760,7 +1784,7 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
         if (m.leafType !== undefined) box.setAttribute('data-ykt-leaf-type', String(m.leafType));
         const pct = Math.min(100, Math.max(0, Math.round((m.progress || 0) * 100)));
         box.setAttribute('data-ykt-leaf-pct', String(pct));
-        if ((m.progress || 0) >= 0.995) box.setAttribute('data-ykt-leaf-done', 'true');
+        if ((m.progress || 0) >= 0.995 || m.completed) box.setAttribute('data-ykt-leaf-done', 'true');
         else box.removeAttribute('data-ykt-leaf-done');
       }
     }
@@ -1776,12 +1800,19 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
       if (leafId) {
         if (completedCacheSet && completedCacheSet.has(leafId)) return true;
         const cacheProg = window.__yktProgressCache?.byId?.[leafId];
-        if (cacheProg && (cacheProg.progress || 0) >= 0.995) return true;
+        if (cacheProg && ((cacheProg.progress || 0) >= 0.995 || cacheProg.completed)) return true;
       }
 
       const t = (box.textContent || '').replace(/\s+/g, ' ').trim();
       if (/未完成|未开始|未读|未提交|未发表/.test(t)) return false;
       if (/已完成|已读|已提交|已发表|已参与|已讨论|100%/.test(t)) return true;
+
+      try {
+        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
+        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
+          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
+        }
+      } catch {}
 
       // Check all possible icon elements: i, svg, use, span, div
       const icons = Array.from(box.querySelectorAll('i, svg, use, span, div'));
@@ -1790,17 +1821,27 @@ const ORDERED_PROGRESS_MAPPING_JS = String.raw`
         const href = String(el.getAttribute('xlink:href') || el.getAttribute('href') || '').toLowerCase();
         const combined = cls + ' ' + href;
         if (/uncheck|not|incomplete|false/i.test(combined)) continue;
-        if (/circle-check|check-circle|icon-check|icon-gou|icon-wancheng|gou|wancheng|finish|success|completed|is-done|is-success/.test(combined)) {
+        if (/circle-check|check-circle|icon-check|icon-gou|icon-wancheng|gou|wancheng|finish|success|completed|is-done|is-success|xuanzhong|duigou|dui|pass|ok|wc/.test(combined)) {
           return true;
         }
       }
 
-      try {
-        const commentedStorage = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-        if (Array.isArray(commentedStorage) && commentedStorage.length > 0) {
-          if (leafId && commentedStorage.some((k) => String(k) === String(leafId))) return true;
+      // Check right side completion icon (distinct from type tag icon on the left)
+      const isDiscuss = /讨论|forum|discuss/i.test(box.textContent || '') || box.getAttribute('data-ykt-leaf-type') === '6';
+      const rightIcons = Array.from(box.querySelectorAll('i, svg, [class*="status"], [class*="check"], [class*="finish"]')).filter(
+        (el) => !el.closest('.tag, .leaf-tag, [class*="tag"]')
+      );
+      if (rightIcons.length > 0) {
+        for (const ri of rightIcons) {
+          const rCls = String(ri.className?.baseVal || ri.className || ri.getAttribute('class') || '').toLowerCase();
+          const rHtml = (ri.innerHTML || '').toLowerCase();
+          if (/uncheck|not|incomplete/i.test(rCls + ' ' + rHtml)) continue;
+          if (/check|gou|wancheng|finish|success|completed|done|xuanzhong|duigou/.test(rCls + ' ' + rHtml)) return true;
         }
-      } catch {}
+        if (isDiscuss) {
+          return true;
+        }
+      }
 
       return false;
     }
@@ -3370,26 +3411,75 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
 
         // Discussion unit handling (only on dedicated discussion pages or #new_discuss, never on video pages)
         if (config.enableDiscussion && (isAiDiscussUnit || doc.querySelector('#new_discuss, .publish_discuss, .discuss-list'))) {
+          const discussKey = location.href.replace(/#.*$/, '');
+          if (win.__yktDiscussWaitUrl !== discussKey) {
+            win.__yktDiscussWaitUrl = discussKey;
+            win.__yktDiscussWaitCount = 0;
+          }
+
+          function getCommentItems() {
+            return Array.from(
+              doc.querySelectorAll(
+                '#new_discuss .new_discuss_list li, .discuss-list .discuss-item, .discuss-list .comment-item, ' +
+                '[class*="comment-list"] [class*="item"], [class*="reply-list"] [class*="item"], ' +
+                '[class*="discuss-list"] [class*="item"], [class*="forum-list"] [class*="item"], ' +
+                '.new_discuss_list .list_item, .discuss-item, .comment-item, .reply-item, .forum-item, ' +
+                '[class*="comment-item"], [class*="discuss-item"], [class*="reply-item"], [class*="forum-item"], ' +
+                '.comment-wrap, .discuss-card, .comment-card'
+              )
+            );
+          }
+
+          function hasEmptyCommentsState() {
+            const emptyEl = doc.querySelector('.el-empty, [class*="empty"], .no-data, .empty-text');
+            if (emptyEl) return true;
+            const bodyText = (doc.body?.innerText || '');
+            return /暂无评论|暂无讨论|还没有人发言|快来发表第一条|暂无数据/.test(bodyText);
+          }
+
+          function isCommentsLoading() {
+            const loadingEl = doc.querySelector(
+              '.el-loading-mask:not([style*="display: none"]), .el-loading-spinner, [class*="loading"]:not([style*="display: none"])'
+            );
+            return Boolean(loadingEl);
+          }
+
+          const currentCommentItems = getCommentItems();
+          const isLoadingComments = isCommentsLoading();
+          const isEmptyComments = hasEmptyCommentsState();
+
+          if (currentCommentItems.length === 0 && !isEmptyComments && win.__yktDiscussWaitCount < 4) {
+            win.__yktDiscussWaitCount += 1;
+            return {
+              action: 'waiting',
+              message: '正在等待讨论区发言列表加载 (' + win.__yktDiscussWaitCount + '/4)…',
+            };
+          }
+
           function hasUserAlreadyCommentedInPage(d) {
             try {
-              const ownActions = Array.from(
-                d.querySelectorAll(
-                  '#new_discuss [class*="del"], #new_discuss [class*="delete"], #new_discuss [class*="edit"], .discuss-list [class*="del"], .discuss-list [class*="delete"], .discuss-list [class*="edit"], .new_discuss_list [class*="del"], .new_discuss_list [class*="delete"], .del-btn, .delete-btn, .btn-del'
-                )
+              const allActions = Array.from(
+                d.querySelectorAll('button, .el-button, a, span, i, div, [role="button"]')
               );
-              if (ownActions.some((el) => {
+              for (const el of allActions) {
+                if (el.closest('.publish_discuss, .input-wrap, .comment-send, form, [class*="publish"], [class*="editor"]')) {
+                  continue;
+                }
                 const t = (el.textContent || '').trim();
-                const cls = String(el.className?.baseVal || el.className || el.getAttribute('class') || '');
-                return /删除|撤回|编辑/i.test(t) || cls.includes('del') || cls.includes('delete');
-              })) {
-                return true;
+                const cls = String(el.className?.baseVal || el.className || el.getAttribute('class') || '').toLowerCase();
+                if (/^(?:删除|撤回|编辑)$/.test(t) || /(?:删除|撤回)/.test(t.slice(0, 4))) return true;
+                if (/icon-shanchu|icon-delete|icon-chehui|el-icon-delete|btn-delete|btn-del/.test(cls)) return true;
               }
 
-              const myBadges = Array.from(d.querySelectorAll('.my-comment, .is-me, .comment-me, [class*="author-me"]'));
+              const myBadges = Array.from(
+                d.querySelectorAll(
+                  '.my-comment, .is-me, .comment-me, [class*="author-me"], [class*="is-self"], .self-comment, [class*="mine"]'
+                )
+              );
               if (myBadges.length > 0) return true;
 
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
+              const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
               const leafId = leafMatch ? leafMatch[1] : '';
               if (leafId && stored.some((item) => String(item) === String(leafId))) {
                 return true;
@@ -3397,6 +3487,9 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
               if (stored.includes(location.href)) {
                 return true;
               }
+
+              const bodyText = (d.body?.innerText || '');
+              if (/你已参与讨论|已完成讨论|已发表观点|已参与本节讨论/.test(bodyText)) return true;
             } catch {}
 
             return false;
@@ -3405,9 +3498,9 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
           function markDiscussDoneInStorage() {
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
-              const leafMatch = location.href.match(/\\/ai-workspace\\/lms-graph\\/\\d+\\/[^/?#]+\\/(\\d+)/i) || location.href.match(/node_id=(\\d+)/i);
+              const leafMatch = location.href.match(/\/ai-workspace\/lms-graph\/\d+\/[^/?#]+\/(\d+)/i) || location.href.match(/node_id=(\d+)/i);
               const leafId = leafMatch ? leafMatch[1] : '';
-              if (leafId && /^\\d+$/.test(leafId) && !stored.includes(leafId)) {
+              if (leafId && /^\d+$/.test(leafId) && !stored.includes(leafId)) {
                 stored.push(leafId);
                 localStorage.setItem('__ykt_commented_discussions', JSON.stringify(stored));
               }
@@ -3422,13 +3515,8 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
 
           function getPreviousClassmateComment() {
             try {
-              const commentContainers = Array.from(
-                doc.querySelectorAll(
-                  '#new_discuss .new_discuss_list li, .discuss-list .discuss-item, .discuss-list .comment-item, [class*="comment-list"] [class*="item"], [class*="reply-list"] [class*="item"], [class*="discuss-list"] [class*="item"], .new_discuss_list .list_item, .discuss-item, .comment-item, .reply-item'
-                )
-              );
-
-              for (const container of commentContainers) {
+              const items = getCommentItems();
+              for (const container of items) {
                 if (
                   container.querySelector('.my-comment, .is-me, [class*="author-me"], [class*="del"], [class*="delete"]') ||
                   container.classList?.contains('my-comment') ||
@@ -3436,16 +3524,20 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
                 ) {
                   continue;
                 }
+                const hasDel = Array.from(container.querySelectorAll('button, a, span, i')).some((b) => /删除|撤回/.test(b.textContent || ''));
+                if (hasDel) continue;
+
                 const contentEl =
-                  container.querySelector('.cont_detail, .comment-content, .content, .text, .comment-text, [class*="content"], p') ||
-                  container;
-                const t = (contentEl.textContent || '').replace(/\\s+/g, ' ').trim();
+                  container.querySelector(
+                    '.cont_detail, .comment-content, .content, .text, .comment-text, [class*="content"], [class*="text"], p'
+                  ) || container;
+                const t = (contentEl.textContent || '').replace(/\s+/g, ' ').trim();
                 if (
                   t.length >= 2 &&
-                  t.length <= 260 &&
-                  !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
-                  !/^\\d+$/.test(t) &&
-                  !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论|赞\\s*\\d*/.test(t)
+                  t.length <= 300 &&
+                  !/^\d{4}[-/]\d{1,2}/.test(t) &&
+                  !/^\d+$/.test(t) &&
+                  !/发表你的观点|暂无评论|还没有人发言|Shift\+Enter|全部评论|话题详情|编辑于|条评论|赞\s*\d*|回复|举报|收起|展开/.test(t)
                 ) {
                   return t;
                 }
@@ -3453,25 +3545,25 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
 
               const rawList = Array.from(
                 doc.querySelectorAll(
-                  '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, .comment-item .content, .reply-item .content, [class*="comment"] [class*="content"]'
+                  '#new_discuss .new_discuss_list .cont_detail, .discuss-list .comment-content, .cont_detail.word-break, .comment-item .content, .reply-item .content, [class*="comment"] [class*="content"], [class*="discuss"] [class*="content"], [class*="forum"] [class*="content"]'
                 )
               );
               for (const el of rawList) {
-                if (el.closest('.my-comment, .is-me, [class*="author-me"], .topic-header, .topic-title, .topic-desc')) continue;
-                const t = (el.textContent || '').replace(/\\s+/g, ' ').trim();
+                if (el.closest('.my-comment, .is-me, [class*="author-me"], .topic-header, .topic-title, .topic-desc, .topic-detail')) continue;
+                const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
                 if (
                   t.length >= 2 &&
-                  t.length <= 260 &&
-                  !/^\\d{4}[-/]\\d{1,2}/.test(t) &&
-                  !/^\\d+$/.test(t) &&
-                  !/发表你的观点|暂无评论|还没有人发言|Shift\\+Enter|全部评论|话题详情|编辑于|条评论|赞\\s*\\d*/.test(t)
+                  t.length <= 300 &&
+                  !/^\d{4}[-/]\d{1,2}/.test(t) &&
+                  !/^\d+$/.test(t) &&
+                  !/发表你的观点|暂无评论|还没有人发言|Shift\+Enter|全部评论|话题详情|编辑于|条评论|赞\s*\d*|回复|举报|收起|展开/.test(t)
                 ) {
                   return t;
                 }
               }
             } catch {}
 
-            return '打卡学习，认真完成本节课程！';
+            return '认真学习，积极完成本节课程！';
           }
 
           let inputEl = doc.querySelector(
@@ -3482,7 +3574,7 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
               doc.querySelectorAll('button, .el-button, a, span, div, p')
             ).find((b) => {
               if (!b || b.children.length > 2) return false;
-              const t = (b.textContent || '').replace(/\\s+/g, '').trim();
+              const t = (b.textContent || '').replace(/\s+/g, '').trim();
               return /^(参与讨论|发表观点|写评论|发表评论|我也说两句|添加评论|写回答|说点什么|发表讨论)$/.test(t) ||
                      /说点什么|参与讨论|发表观点/.test(t.slice(0, 8));
             });
@@ -3498,14 +3590,14 @@ export function buildHandleContentExtraTaskScript(config: CourseBrushConfig): st
           let submitBtn =
             doc.querySelector('.el-button.submitComment, .publish_discuss .postBtn button, .submit-comment-btn, #new_discuss button[class*="submit"], #new_discuss button[class*="post"]') ||
             Array.from(doc.querySelectorAll('button, .el-button, a[role="button"], span[role="button"], div[role="button"], span, div')).find((b) =>
-              /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\\s+/g, '').trim())
+              /^(发送|发表|发表评论|发布|提交评论|回复)$/.test((b.textContent || '').replace(/\s+/g, '').trim())
             );
 
           if (!submitBtn && inputEl) {
             const inputWrap = inputEl.parentElement?.parentElement || inputEl.parentElement;
             if (inputWrap) {
               const enterHint = Array.from(inputWrap.querySelectorAll('span, div')).find(
-                (el) => el.children.length === 0 && /Enter\\s*发送/i.test(el.textContent || '')
+                (el) => el.children.length === 0 && /Enter\s*发送/i.test(el.textContent || '')
               );
               if (enterHint && enterHint.parentElement) {
                 submitBtn =
@@ -3887,6 +3979,7 @@ ${ORDERED_PROGRESS_MAPPING_JS}
           if (!isVideo && !isDiscuss && !isHomework && !isCourseware) continue;
           if (isDiscuss) {
             const leafId = item.getAttribute('data-ykt-leaf-id');
+            if (leafId && completedCache.has(leafId)) continue;
             let alreadyCommented = false;
             try {
               const stored = JSON.parse(localStorage.getItem('__ykt_commented_discussions') || '[]');
