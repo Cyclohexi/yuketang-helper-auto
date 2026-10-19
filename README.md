@@ -184,29 +184,25 @@ mindmap
 
 ## 📸 界面预览与操作指引
 
-### 1. 登录与身份绑定
-打开应用后，通过微信或手机号扫码登录雨课堂官方网页（支持普通雨课堂、荷塘雨课堂及长江雨课堂等多校园环境）：
+### 1. 扫码登录与 API 配置
+打开应用后，支持选择不同雨课堂服务器节点（雨课堂、荷塘雨课堂、长江雨课堂、黄河雨课堂等），通过微信或雨课堂 APP 扫码即可完成登录；点击顶部“模型”面板（AI Profile），选择模型厂商、填入 Base URL 与 API Key，即可一键配置大模型推理服务，并支持为文本分析、多模态视觉（VLM）、OCR 与翻译单独指定分工模型。
 
 <p align="center">
-  <img src="./static/desktop/main.png" width="720" alt="主界面与登录" />
+  <img src="./static/desktop/login_and_api.png" width="820" alt="扫码登录与模型API配置" />
 </p>
 
-### 2. 配置大模型 API
-在左侧菜单进入“设置”，填入您的 API Key、Base URL 与对应的模型名称：
+### 2. 课程全自动刷课
+进入课程学习日志页面，右侧助手面板将呈现“自动刷课 & AI 作业联网”控制台。点击 **【启动自动刷课】** 即可开启全自动化流转：系统全自动扫描并定位未完成节点、**自动开启静音并锁定 2.0x 倍速播放**、**课件 (PPT) 自动翻页**、**讨论区智能提取同班同学发言跟帖**，以及课后作业 AI 作答。
 
 <p align="center">
-  <img src="./static/desktop/set_model.png" width="720" alt="配置模型与API" />
+  <img src="./static/desktop/auto_brush.png" width="820" alt="课程全自动刷课控制台" />
 </p>
 
-### 3. 选择课程与自动化刷课
-在课程列表页进入待学课程，点击右上角自动化按钮，助手将全自动扫描进度并启动刷课流：
+### 3. 课堂题目自动检测、AI 作答与全量查看（支持强制补交）
+在上课过程中，系统自动监听捕获随堂新题并实时唤起 AI 解析与**自动答题提交**。左侧课件栏直观列出**当前课堂中全部老师已展示及未展示的题目**；不仅支持一键采纳 AI 建议作答，还可在题目超时或错过后一键点击 **【强制补交】**，课堂答题全把控。
 
 <p align="center">
-  <img src="./static/desktop/set_class.png" width="720" alt="连接课堂" />
-</p>
-
-<p align="center">
-  <img src="./static/desktop/in_class.png" width="720" alt="课堂辅助" />
+  <img src="./static/desktop/in_class_ai.png" width="820" alt="课堂题目检测、AI答题与题目全量查看" />
 </p>
 
 ---
