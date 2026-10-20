@@ -25,12 +25,6 @@
 
 <p align="center">解压即用 · 无需准备开发环境 · 支持应用内自动更新</p>
 
-<a id="preview"></a>
-
-<p align="center">
-  <img src="./static/desktop/in_class_ai.png" width="960" alt="雨课堂助手主界面：左侧预览课件和题目，右侧进行 AI 分析与作答" />
-</p>
-
 基于 [ZaytsevZY/yuketang-helper-auto](https://github.com/ZaytsevZY/yuketang-helper-auto) 二次开发，延续课堂提醒、课件管理与 AI 辅助学习能力，并扩展课程自动化和便携版自动更新。
 
 <a id="quick-start"></a>
@@ -89,6 +83,12 @@ AI 调用可能产生服务商费用。不使用 AI 时，仍可使用登录、�
 | 答案校验与补交     | 校验答案；符合当前课堂和平台条件时，可尝试补交         |
 
 课件预览范围以当前课堂实际获取的内容为准；AI 分析与自动提交需要相应模型配置和功能开关。
+
+<a id="preview"></a>
+
+<p align="center">
+  <img src="./static/desktop/in_class_ai.png" width="960" alt="雨课堂助手主界面：左侧预览课件和题目，右侧进行 AI 分析与作答" />
+</p>
 
 <a id="version-history"></a>
 
