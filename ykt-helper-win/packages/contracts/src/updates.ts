@@ -11,7 +11,7 @@ export type UpdatePhase =
 
 export interface AppUpdateState {
   readonly phase: UpdatePhase;
-  readonly mode: 'portable' | 'installed' | 'unsupported';
+  readonly mode: 'portable' | 'unsupported';
   readonly currentVersion: string;
   readonly latestVersion?: string;
   readonly progress?: number;

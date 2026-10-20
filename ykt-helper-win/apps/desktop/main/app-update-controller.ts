@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -21,15 +20,6 @@ import {
   type UpdateRelease,
 } from './update-release.js';
 
-export interface NativeUpdateDriver extends Pick<
-  EventEmitter,
-  'on' | 'removeListener'
-> {
-  setFeedURL(options: { url: string }): void;
-  checkForUpdates(): void;
-  quitAndInstall(): void;
-}
-
 export interface AppUpdateOptions {
   version: string;
   mode: AppUpdateState['mode'];
@@ -39,7 +29,6 @@ export interface AppUpdateOptions {
   onState: (state: AppUpdateState) => void;
   beforeInstall: () => Promise<void>;
   quit: () => void;
-  nativeUpdater: NativeUpdateDriver;
   preparePortable?: (job: PortableUpdateJob) => Promise<void>;
   launchPortable?: (directory: string) => Promise<void>;
 }
@@ -50,12 +39,10 @@ export class AppUpdateController {
   #manifest: PortableManifest | undefined;
   #jobDirectory: string | undefined;
   #busy = false;
-  #nativeBusy = false;
   #initialTimer: ReturnType<typeof setTimeout> | undefined;
   #interval: ReturnType<typeof setInterval> | undefined;
   #abort: AbortController | undefined;
   #disposed = false;
-  readonly #nativeListeners: Array<[string, (...args: any[]) => void]>;
 
   constructor(private readonly options: AppUpdateOptions) {
     this.#state = {
@@ -64,42 +51,9 @@ export class AppUpdateController {
       currentVersion: options.version,
       message:
         options.mode === 'unsupported'
-          ? '自动更新仅支持 Windows x64 安装版或便携版，开发模式不检查更新。'
+          ? '自动更新支持 Windows x64 便携版，开发模式不检查更新。'
           : '启动后自动检查更新，也可手动检查。',
     };
-    this.#nativeListeners = [
-      [
-        'error',
-        (error: Error) => {
-          if (!this.#nativeBusy) return;
-          this.#nativeBusy = false;
-          this.fail(error);
-        },
-      ],
-      [
-        'update-not-available',
-        () => {
-          if (!this.#nativeBusy) return;
-          this.#nativeBusy = false;
-          this.set({ phase: 'current', message: '当前已是最新可安装版本。' });
-        },
-      ],
-      [
-        'update-downloaded',
-        () => {
-          if (!this.#nativeBusy) return;
-          this.#nativeBusy = false;
-          this.set({
-            phase: 'ready',
-            message: '更新已下载，重启即可完成安装。',
-          });
-        },
-      ],
-    ];
-    if (options.mode === 'installed') {
-      for (const [event, listener] of this.#nativeListeners)
-        options.nativeUpdater.on(event, listener);
-    }
   }
 
   getState(): AppUpdateState {
@@ -155,21 +109,12 @@ export class AppUpdateController {
         this.set({ phase: 'current', message: '当前已是最新版本。' });
         return this.getState();
       }
-      if (this.options.mode === 'portable') {
-        const asset = release.assets.find(
-          (item) => item.name === MANIFEST_NAME,
-        );
-        if (!asset) throw new Error('新版尚未发布便携版更新清单，请稍后重试。');
-        this.#manifest = parsePortableManifest(
-          await this.json(asset.browser_download_url),
-          release,
-        );
-      } else if (
-        !release.assets.some((item) => item.name === 'RELEASES') ||
-        !release.assets.some((item) => /-full\.nupkg$/i.test(item.name))
-      ) {
-        throw new Error('新版尚未发布安装版更新文件，请稍后重试。');
-      }
+      const asset = release.assets.find((item) => item.name === MANIFEST_NAME);
+      if (!asset) throw new Error('新版尚未发布便携版更新清单，请稍后重试。');
+      this.#manifest = parsePortableManifest(
+        await this.json(asset.browser_download_url),
+        release,
+      );
       this.#release = release;
       this.set({
         phase: 'available',
@@ -193,36 +138,25 @@ export class AppUpdateController {
       message: '正在下载更新，可继续使用应用…',
     });
     try {
-      if (this.options.mode === 'installed') {
-        this.#nativeBusy = true;
-        this.options.nativeUpdater.setFeedURL({
-          url: releaseDownloadBase(this.#release.tag),
-        });
-        this.options.nativeUpdater.checkForUpdates();
-      } else {
-        const manifest = this.#manifest!;
-        await mkdir(this.options.directory, { recursive: true });
-        this.#jobDirectory = await mkdtemp(
-          join(this.options.directory, 'job-'),
-        );
-        await this.downloadArchive(manifest, this.#release);
-        await (this.options.preparePortable ?? preparePortableUpdate)({
-          directory: this.#jobDirectory,
-          id: randomUUID(),
-          executable: this.options.executable,
-          resultPath: join(this.options.directory, 'result.json'),
-          version: manifest.version,
-          sha256: manifest.sha256,
-          size: manifest.size,
-        });
-        this.set({
-          phase: 'ready',
-          progress: 100,
-          message: '更新已下载并校验，重启后安装；本地数据会保留。',
-        });
-      }
+      const manifest = this.#manifest!;
+      await mkdir(this.options.directory, { recursive: true });
+      this.#jobDirectory = await mkdtemp(join(this.options.directory, 'job-'));
+      await this.downloadArchive(manifest, this.#release);
+      await (this.options.preparePortable ?? preparePortableUpdate)({
+        directory: this.#jobDirectory,
+        id: randomUUID(),
+        executable: this.options.executable,
+        resultPath: join(this.options.directory, 'result.json'),
+        version: manifest.version,
+        sha256: manifest.sha256,
+        size: manifest.size,
+      });
+      this.set({
+        phase: 'ready',
+        progress: 100,
+        message: '更新已下载并校验，重启后安装；本地数据会保留。',
+      });
     } catch (error) {
-      this.#nativeBusy = false;
       if (this.#jobDirectory)
         await rm(this.#jobDirectory, { recursive: true, force: true }).catch(
           () => {},
@@ -240,17 +174,13 @@ export class AppUpdateController {
     this.#busy = true;
     this.set({ phase: 'installing', message: '正在关闭应用并安装更新…' });
     try {
-      if (this.options.mode === 'portable') {
-        // Spawn successfully before shutting services down. The helper waits for
-        // this PID to exit, so files cannot be replaced while the app is live.
-        await (this.options.launchPortable ?? launchPortableUpdate)(
-          this.#jobDirectory!,
-        );
-      }
+      // Spawn successfully before shutting services down. The helper waits for
+      // this PID to exit, so files cannot be replaced while the app is live.
+      await (this.options.launchPortable ?? launchPortableUpdate)(
+        this.#jobDirectory!,
+      );
       await this.options.beforeInstall();
-      if (this.options.mode === 'installed')
-        this.options.nativeUpdater.quitAndInstall();
-      else this.options.quit();
+      this.options.quit();
     } catch (error) {
       this.fail(error);
     } finally {
@@ -264,17 +194,12 @@ export class AppUpdateController {
     clearTimeout(this.#initialTimer);
     clearInterval(this.#interval);
     this.#abort?.abort();
-    if (this.options.mode === 'installed') {
-      for (const [event, listener] of this.#nativeListeners)
-        this.options.nativeUpdater.removeListener(event, listener);
-    }
   }
 
   private blocked(): boolean {
     return (
       this.#disposed ||
       this.#busy ||
-      this.#nativeBusy ||
       this.#state.phase === 'disabled' ||
       this.#state.phase === 'installing'
     );

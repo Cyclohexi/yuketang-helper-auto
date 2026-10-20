@@ -17,11 +17,9 @@
     "@ykt/routing": "2.2.0",
     "@ykt/storage": "2.2.0",
     "acorn": "^8.18.0",
-    "electron-squirrel-startup": "^1.0.1",
     "vue": "^3.5.20"
   },
   "devDependencies": {
-    "@types/electron-squirrel-startup": "^1.0.2",
     "electron": "^44.0.0",
     "tsup": "^8.5.0"
   }

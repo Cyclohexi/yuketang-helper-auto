@@ -6,7 +6,6 @@ import { dirname, join } from 'node:path';
 
 import {
   app,
-  autoUpdater,
   BrowserWindow,
   dialog,
   ipcMain,
@@ -37,7 +36,6 @@ import {
   FileSecretStore,
   SqliteAppDataStore,
 } from '@ykt/storage';
-import electronSquirrelStartup from 'electron-squirrel-startup';
 
 import { BrowserController } from './browser-controller.js';
 import {
@@ -79,14 +77,9 @@ let quitAfterCleanup = false;
 let keepScreenAwake = false;
 let wakeLockId: number | null = null;
 
-if (electronSquirrelStartup) {
-  app.quit();
-}
-
 configureStorageProfile();
 
-const hasSingleInstanceLock =
-  !electronSquirrelStartup && app.requestSingleInstanceLock();
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
@@ -1177,28 +1170,19 @@ if (hasSingleInstanceLock) {
       const portable =
         process.argv.includes('--portable') ||
         existsSync(join(dirname(executable), 'portable.flag'));
-      const installed = existsSync(
-        join(dirname(dirname(executable)), 'Update.exe'),
-      );
       const mode =
         !app.isPackaged ||
         process.platform !== 'win32' ||
-        process.arch !== 'x64'
+        process.arch !== 'x64' ||
+        !portable
           ? 'unsupported'
-          : portable
-            ? 'portable'
-            : installed
-              ? 'installed'
-              : 'unsupported';
-      if (mode === 'installed')
-        app.setAppUserModelId('com.squirrel.YuketangHelper.YuketangHelper');
+          : 'portable';
       appUpdates = new AppUpdateController({
         version: app.getVersion(),
         mode,
         executable,
         directory: join(app.getPath('userData'), 'updates'),
         fetch: (url, init) => net.fetch(url, { ...init, credentials: 'omit' }),
-        nativeUpdater: autoUpdater,
         onState: (state) => {
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send(

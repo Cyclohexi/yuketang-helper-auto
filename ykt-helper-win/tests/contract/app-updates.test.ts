@@ -1,13 +1,9 @@
 import { createHash } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  AppUpdateController,
-  type NativeUpdateDriver,
-} from '../../apps/desktop/main/app-update-controller.js';
+import { AppUpdateController } from '../../apps/desktop/main/app-update-controller.js';
 import {
   isNewerVersion,
   MANIFEST_NAME,
@@ -41,12 +37,7 @@ function release(overrides: Record<string, unknown> = {}) {
     tag_name: `v${version}`,
     draft: false,
     prerelease: false,
-    assets: [
-      MANIFEST_NAME,
-      zipName,
-      'RELEASES',
-      `YuketangHelper-${version}-full.nupkg`,
-    ].map((name) => ({
+    assets: [MANIFEST_NAME, zipName].map((name) => ({
       name,
       size: name === zipName ? archive.length : 100,
       browser_download_url: `${releaseDownloadBase(`v${version}`)}/${name}`,
@@ -55,16 +46,11 @@ function release(overrides: Record<string, unknown> = {}) {
   };
 }
 async function setup(
-  mode: 'portable' | 'installed' | 'unsupported' = 'portable',
+  mode: 'portable' | 'unsupported' = 'portable',
   content: Uint8Array = archive,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'ykt-updates-test-'));
   directories.push(directory);
-  const driver = Object.assign(new EventEmitter(), {
-    setFeedURL: vi.fn(),
-    checkForUpdates: vi.fn(),
-    quitAndInstall: vi.fn(),
-  });
   const options = {
     version: '2.2.0',
     mode,
@@ -75,7 +61,6 @@ async function setup(
         ? new Response(content as BodyInit)
         : Response.json(url.endsWith('.json') ? manifest : release()),
     ),
-    nativeUpdater: driver as NativeUpdateDriver,
     onState: vi.fn(),
     beforeInstall: vi.fn(async () => {}),
     quit: vi.fn(),
@@ -84,7 +69,7 @@ async function setup(
   };
   const controller = new AppUpdateController(options);
   controllers.push(controller);
-  return { controller, options, driver };
+  return { controller, options };
 }
 
 describe('update release validation', () => {
@@ -206,30 +191,32 @@ describe('app update lifecycle', () => {
     await controller.check();
     expect(controller.getState().phase).toBe('current');
   });
-  it('uses the Squirrel feed only after download is requested and waits for ready before quitting', async () => {
-    const { controller, options, driver } = await setup('installed');
+  it('deduplicates downloads and waits for preparation before allowing a restart', async () => {
+    const { controller, options } = await setup();
     await controller.check();
-    expect(driver.checkForUpdates).not.toHaveBeenCalled();
+    let finish!: () => void;
+    options.preparePortable.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const pending = controller.download();
+    await vi.waitFor(() =>
+      expect(options.preparePortable).toHaveBeenCalledOnce(),
+    );
+    await controller.download();
     await controller.install();
-    expect(driver.quitAndInstall).not.toHaveBeenCalled();
-    await controller.download();
-    await controller.download();
-    expect(driver.setFeedURL).toHaveBeenCalledWith({
-      url: releaseDownloadBase(`v${version}`),
-    });
-    expect(driver.checkForUpdates).toHaveBeenCalledOnce();
-    driver.emit('update-downloaded');
+    expect(options.fetch).toHaveBeenCalledTimes(3);
+    expect(options.quit).not.toHaveBeenCalled();
+    finish();
+    await pending;
     expect(controller.getState().phase).toBe('ready');
     await controller.install();
     expect(options.beforeInstall).toHaveBeenCalledOnce();
-    expect(driver.quitAndInstall).toHaveBeenCalledOnce();
+    expect(options.quit).toHaveBeenCalledOnce();
   });
-  it('handles Squirrel download failures and helper startup failure without shutting services down', async () => {
-    const installed = await setup('installed');
-    await installed.controller.check();
-    await installed.controller.download();
-    installed.driver.emit('error', new Error('offline'));
-    expect(installed.controller.getState().phase).toBe('error');
+  it('handles helper startup failure without shutting services down', async () => {
     const portable = await setup();
     await portable.controller.check();
     await portable.controller.download();

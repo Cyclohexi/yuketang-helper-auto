@@ -12,7 +12,7 @@
 - 提供稳定、受控、可审计的 CLI/skills 接口，供 OpenCode 等 agent harness 调用。
 - 将 LLM 定位为可选的答案建议模块，而不是直接提交答案的单次调用入口。
 - 支持标准雨课堂、荷塘雨课堂和长江雨课堂的独立适配。
-- 最终提供 Windows installer 和 portable 可执行版本。
+- 最终提供 Windows x64 ZIP 便携版本，解压即可运行。
 
 ## 2. 技术选型
 
@@ -468,17 +468,17 @@ Skills 不直接访问数据库或 Routing 内部模块，只调用公开 CLI。
 
 任务：
 
-- 使用 Electron Forge 构建 Windows installer 和 portable 版本。
-- 配置版本信息、图标、升级和卸载。
+- 使用 Electron Forge 构建 Windows x64 ZIP 便携版本。
+- 配置版本信息、图标和便携版自动更新。
 - 加入代码签名、校验和和依赖清单。
-- 在干净 Windows 虚拟机验证安装、登录、网络捕获和 CLI。
+- 在干净 Windows 虚拟机验证解压运行、登录、网络捕获和 CLI。
 - userscript 至少保留一个迁移周期。
 - 编写用户手册、开发者手册和网络调试教程。
 
 验收：
 
 - 未安装 Node.js 的 Windows 用户可正常运行。
-- 安装包中不包含开发凭据、测试课堂数据或 source map 敏感信息。
+- 便携包中不包含开发凭据、测试课堂数据或 source map 敏感信息。
 - GUI、CLI 和 portable 版本通过发布冒烟测试。
 
 ## 8. 第一里程碑
@@ -545,6 +545,6 @@ Skills 不直接访问数据库或 Routing 内部模块，只调用公开 CLI。
 单人开发的初步估算：
 
 - 可运行的第一里程碑：4–6 周。
-- 三环境兼容、现有主要功能迁移、CLI/skills 和安装包：8–12 周。
+- 三环境兼容、现有主要功能迁移、CLI/skills 和便携包：8–12 周。
 
 该估算需要在完成 M2 并获得三个环境的真实脱敏协议样本后重新校准。

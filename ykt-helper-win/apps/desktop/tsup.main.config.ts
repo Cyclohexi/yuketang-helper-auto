@@ -10,7 +10,7 @@ export default defineConfig({
   platform: 'node',
   target: 'node24',
   external: ['electron', 'node:sqlite'],
-  noExternal: [/^@ykt\//, 'electron-squirrel-startup', 'acorn'],
+  noExternal: [/^@ykt\//, 'acorn'],
   removeNodeProtocol: false,
   outDir: 'dist/main',
   clean: true,

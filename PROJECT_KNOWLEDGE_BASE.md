@@ -131,7 +131,7 @@ ykt-helper-win/
 ### 3.2 开发模式与历史配置回退机制
 - 若以源码开发方式（`npm start`）启动且未指定 `--portable`，Electron 会默认读取 Windows 系统盘的 `%APPDATA%\ykt-helper-win`。
 - **为什么曾经“一下载解压就有配置”？**  
-  是因为用户之前在电脑上运行过旧版安装程序（Setup.exe），其在系统的 `%APPDATA%` 中遗留了历史配置。当运行 Portable 版时，只要同级存在 `ykt-helper-data`，便完全与系统隔离，不再相互干扰。
+   开发模式可能读取系统中的历史配置。便携版通过 `portable.flag` 将数据定位到程序旁的 `ykt-helper-data`，使配置与程序目录保持一致。
 
 ---
 
@@ -196,10 +196,10 @@ ykt-helper-win/
    - 修复了 `course-brush-controller.ts` 中 `buildDetectAndJumpToFirstIncompleteScript` 缺失 `try` 块的语法错误；
    - 修复了 `buildHandleContentExtraTaskScript` 中的正则表达式转义问题；
    - 验证了所有 39 套契约测试（368 个测试用例全部绿灯通过）。
-2. **打包策略重大重构（彻底告别 Setup.exe）**：
-   - 发现安装版（Setup.exe）在用户端存在安装卡死、系统路径权限污染及写入注册表难卸载的问题；
-   - **执行用户决策**：本地与 GitHub Releases 全面删除 `YuketangHelper-Setup.exe`；
-   - 固化 **`YuketangHelper-v2.1.0-Windows-x64-Portable.zip`** 为官方唯一发布的绿色便携格式。
+2. **统一便携发行格式**：
+   - 官方发行物统一为 Windows x64 ZIP 便携包及自动更新清单。
+   - 所有打包入口始终生成 `portable.flag`，程序旁的 `ykt-helper-data` 保存用户配置。
+   - 项目首页、开发文档及更新流程统一围绕便携版维护。
 3. **代码库与工作目录物理迁移**：
    - 将整个代码库平滑迁移至独立工程盘：`E:\MyProject\yuketang-helper-auto`；
    - 更新并重构了桌面启动批处理 `启动雨课堂助手.bat` 与用户的桌面启动脚本 `g:\DeskBox\wjx20\学习\启动雨课堂助手.bat`。
@@ -262,8 +262,8 @@ npm run release:upload
 
 任何后续接手的 AI 助手或开发者，**必须严格遵守以下原则，严禁违背**：
 
-1. 🚫 **绝对禁止重新引入 `Setup.exe` 安装包**：
-   用户已经明确要求弃用安装程序。一切发行物只认绿色免安装版 `YuketangHelper-*.zip`，解压即用，绝不使用 Squirrel 或 NSIS 写入用户系统盘。
+1. 📦 **只维护绿色便携版**：
+   正式发行物仅使用 `YuketangHelper-*.zip` 和 `update-win32-x64.json`。打包流程、更新逻辑、首页及发布说明均以便携版为准，解压即用。
 2. 🛡️ **契约测试必须全绿**：
    任何对 `course-brush-controller.ts` 或浏览器注入脚本的修改，必须运行 `npm test`，确保 39 套套件（368+ 个测试）100% 通过。严禁在测试报错的情况下强行提交代码。
 3. 💾 **严格保护用户本地数据**：

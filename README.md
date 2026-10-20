@@ -235,9 +235,9 @@ npm run release:prepare
 ## ❓ 常见问题排查 (FAQ)
 
 <details>
-<summary><strong>Q1: 为什么推荐绿色便携版 (Portable ZIP) 而非传统的 Setup 安装包？</strong></summary>
+<summary><strong>Q1: 便携版如何使用，数据保存在哪里？</strong></summary>
 
-> **答**：传统安装包会将配置和缓存深度写入系统的 `%AppData%` 与注册表中，不仅卸载时容易残留，且在学校机房或公共电脑上往往受限于管理员权限。绿色便携版将所有运行时与数据完全封装在解压目录内的 `ykt-helper-data` 中，真正做到了“即解即用、拔盘即走、纯净无痕”。
+> **答**：下载 ZIP 并解压，双击 `YuketangHelper.exe` 即可使用。登录状态、模型配置和缓存保存在程序旁的 `ykt-helper-data` 文件夹中；移动程序或首次手动升级时，请一并保留这个文件夹。
 </details>
 
 <details>
