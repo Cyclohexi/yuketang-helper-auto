@@ -96,6 +96,14 @@ AI 调用可能产生服务商费用。不使用 AI 时，仍可使用登录、�
 
 每次发布的变化按时间倒序记录。[完整更新日志](./changelog.md) · [全部发行版本](https://github.com/Cyclohexi/yuketang-helper-auto/releases)
 
+### 未发布 · 统一配置目录与项目维护
+
+- 当前源码及本地新构建程序统一使用 C 盘用户目录 `%LOCALAPPDATA%\YuketangHelper`，BAT 和 EXE 共用配置，更新程序不覆盖数据。
+- 首次使用时复制旧数据并保留原件，调试模式使用独立数据目录。
+- 增加项目维护记忆和同步检查，代码、说明及增量日志一起维护。
+
+以上变化尚未包含在下方已发布的 v2.2.0 便携包中。
+
 ### v2.2.0 · 自动更新（2026-10-20）
 
 第二个 Release，也是首次功能更新。
@@ -132,7 +140,9 @@ AI 调用可能产生服务商费用。不使用 AI 时，仍可使用登录、�
 <details>
 <summary>登录状态、API Key 和缓存保存在哪里？</summary>
 
-便携程序旁的 `ykt-helper-data` 保存登录状态、模型配置和缓存。移动程序或手动升级时，请一起保留这个文件夹。保留数据通常可以恢复登录；登录失效时仍需重新扫码。
+当前源码及本地新构建程序将登录状态、模型配置和缓存统一保存在 `%LOCALAPPDATA%\YuketangHelper`（通常为 `C:\Users\你的用户名\AppData\Local\YuketangHelper`）。BAT 与 EXE 读取同一处，移动或更新程序不会替换此目录。首次启动会复制旧数据并保留原件，请先关闭旧程序。
+
+已发布的 v2.2.0 及更早便携包仍使用程序旁的 `ykt-helper-data`。升级到采用固定目录的新版时，旧数据会在首次迁移时复制过去。登录失效时仍需重新扫码；跨电脑复制后，加密凭据可能需要重新填写。
 
 配置保存在本地。使用 AI 功能时，相关题目文字、课件内容或截图会发送到你配置的模型服务进行处理。
 
@@ -166,6 +176,8 @@ v2.2.0 起支持应用内更新：点击顶部版本按钮检查并下载，下�
 工程采用 Electron、Vue 3 和 TypeScript，使用 npm workspaces 管理桌面端、CLI 与共享业务包。目录结构、开发命令、测试和诊断说明见[开发者文档](./ykt-helper-win/README.md)。
 
 [自动更新与发布](./ykt-helper-win/docs/auto-update.md) · [CLI 使用说明](./ykt-helper-win/docs/cli-assignments.md) · [反馈问题](https://github.com/Cyclohexi/yuketang-helper-auto/issues)
+
+项目维护规则保存在 [AGENTS.md](./AGENTS.md)，每次同步按[维护清单](./ykt-helper-win/docs/project-maintenance.md)检查代码与受影响文档，并执行 `npm run sync:check`。
 
 ## 致谢
 

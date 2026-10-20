@@ -13,6 +13,7 @@
     "packages/*"
   ],
   "scripts": {
+    "sync:check": "node scripts/check-project-sync.mjs",
     "version:set": "node scripts/set-release-version.mjs",
     "release:prepare": "node scripts/prepare-update-release.mjs",
     "release:upload": "node scripts/upload-release.mjs",

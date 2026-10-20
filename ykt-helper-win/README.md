@@ -31,6 +31,8 @@ ykt-helper-win/
 
 ## 开发命令
 
+项目记忆入口为根目录 [AGENTS.md](../AGENTS.md)。每次同步先读取[项目维护清单](docs/project-maintenance.md)，执行 `npm run sync:check`，将代码、测试与受影响文档一起提交；它不会自动提交或发布。
+
 完成依赖安装后，Windows 用户可双击仓库根目录的[启动雨课堂助手.bat](../启动雨课堂助手.bat)。启动器优先使用源码构建；检测到代码更新或缺少构建文件时会先编译，再打开桌面程序。未配置源码运行依赖时，可回退到 `desktop/out` 中已有的便携程序。
 
 在仓库根目录执行 `启动雨课堂助手.bat -Rebuild` 可强制重新构建，`启动雨课堂助手.bat -CheckOnly` 只检查启动路径与是否需要构建，不打开程序。
@@ -245,7 +247,7 @@ M4 为 standard、pro 和 changjiang 分别固定了 host adapter，并实现用
 
 答题和补交仍是明确的主动操作，经嵌入网页相同的 Chromium Session 发送，并沿用相同的凭据脱敏规则。
 
-当前 UI 不会自动签到或提交；相关能力只通过 Backend Facade 和受限 IPC 暴露，等待后续课堂与题目界面显式调用。
+课堂连接复用官方网页链路；启用 AI 自动确认提交后，助手可通过 Backend Facade 和受限 IPC 校验并提交答案，相关配置与日志由本地应用管理。
 
 ## 本地存储
 
@@ -253,14 +255,17 @@ M5 使用 Node 内置 SQLite 保存普通设置、用户信息、脱敏日志和
 
 雨课堂 Authorization Token 不进入 SQLite：当前网页 localStorage 和主动请求返回的 `Set-Auth` 会同步到 Electron `safeStorage` 加密的凭据文件，失效响应会清除旧值。设置中出现 Cookie、Token、API Key、Password 等敏感字段会被拒绝，日志和课件元数据在写入前统一脱敏。
 
-默认数据位于 Electron `userData/storage`。也可使用隔离 profile 启动：
+Windows 的 Electron `userData` 与 `sessionData` 统一固定为 `%LOCALAPPDATA%\YuketangHelper`，与源码、BAT、EXE 名称和位置无关。设置数据库位于 `storage/yuketang.sqlite`，加密凭据位于 `storage/credentials.json`，网页会话及浏览器缓存也在该根目录下。应用更新只替换程序文件，不替换此目录。
+
+首次启动且固定目录不存在时，从旧 `ykt-helper-data`、`%APPDATA%\雨课堂助手`、`%APPDATA%\@ykt\desktop` 等位置复制完整 profile；优先已有设置或用户记录的数据，同等级选择数据库较新的数据。复制成功才启用新目录，原件保留，多份配置不混合。迁移前关闭旧版；已有固定目录后不再导入。
+
+使用隔离数据进行测试：
 
 ```powershell
 npm start -- --debug-profile
-npm start -- --portable
 ```
 
-`--debug-profile` 使用独立调试数据目录；`--portable` 将整个 Electron userData（包括 Cookie、网页缓存和应用数据库）放到可执行文件旁的 `ykt-helper-data`。
+`--debug-profile` 使用同级的 `%LOCALAPPDATA%\YuketangHelper-debug`，不导入正式配置。`--portable` 与 `portable.flag` 只用于识别便携发行及升级，不再更改数据路径。已发布的旧版二进制仍遵循其原有数据规则；本次调整在下一次正式发布后才提供给下载用户。
 
 ## AI 工作流
 
@@ -279,7 +284,7 @@ npm run make:portable
 npm run release:prepare
 ```
 
-正式发行物使用 ZIP 便携包。运行桌面端后，可通过应用根目录中的 `ykt.cmd` 执行 `status` 等 desktop-attached CLI 命令。便携版会把 Cookie、缓存和应用数据写到可执行文件旁的 `ykt-helper-data`。
+正式发行物使用 ZIP 便携包。运行桌面端后，可通过应用根目录中的 `ykt.cmd` 执行 `status` 等 desktop-attached CLI 命令。当前源码构建的便携版把 Cookie、缓存和应用数据统一写到 `%LOCALAPPDATA%\YuketangHelper`，无需安装程序，更新或移动程序不会覆盖配置。
 
 若当前网络无法访问 GitHub 的 Electron 分发地址，可在构建终端临时指定镜像后重试：
 

@@ -61,6 +61,11 @@ import { PersistentNetworkArchive } from './persistent-network-archive.js';
 import { isSourceModuleId, sourceModulePath } from './source-modules.js';
 import { CourseBrushController } from './course-brush-controller.js';
 import { AppUpdateController } from './app-update-controller.js';
+import {
+  legacyStorageDirectories,
+  prepareStorageDirectory,
+  storageProfileDirectory,
+} from './storage-profile.js';
 
 let assignmentAssets: AssignmentAssets | undefined;
 let assignmentAnswerPending = false;
@@ -95,19 +100,23 @@ if (!hasSingleInstanceLock) {
 }
 
 function configureStorageProfile(): void {
-  if (app.getName() === 'Electron') {
-    app.setName('@ykt/desktop');
-    app.setPath('userData', join(app.getPath('appData'), '@ykt', 'desktop'));
-  }
-  const portableMarker = join(dirname(app.getPath('exe')), 'portable.flag');
-  if (process.argv.includes('--portable') || existsSync(portableMarker)) {
-    app.setPath(
-      'userData',
-      join(dirname(app.getPath('exe')), 'ykt-helper-data'),
-    );
-  } else if (process.argv.includes('--debug-profile')) {
-    app.setPath('userData', join(app.getPath('userData'), 'debug-profile'));
-  }
+  const options = {
+    appData: app.getPath('appData'),
+    localAppData: process.env.LOCALAPPDATA,
+    executable: app.getPath('exe'),
+    legacyUserData: app.getPath('userData'),
+    argv: process.argv,
+    platform: process.platform,
+  };
+  const directory = storageProfileDirectory(options);
+  prepareStorageDirectory(
+    directory,
+    legacyStorageDirectories(options),
+    process.argv.includes('--debug-profile'),
+  );
+  app.setName('雨课堂助手');
+  app.setPath('userData', directory);
+  app.setPath('sessionData', directory);
 }
 
 function isTrustedRenderer(sender: WebContents, senderUrl: string): boolean {
