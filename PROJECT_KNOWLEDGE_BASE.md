@@ -71,6 +71,8 @@ README 下载与三步上手前置；首次配置截图折叠，刷课截图位�
 
 根 BAT 使用短的 ASCII + CRLF 入口调用带 UTF-8 BOM 的 `scripts/start-desktop.ps1`，避免 Windows cmd 的编码与路径解析问题。优先源码；缺少构建或源码更新时自动构建；没有本地 Electron 时才回退已有便携 EXE。`-CheckOnly` 只检查，`-Rebuild` 强制构建。维护时保留 `.gitattributes` 的 Windows 换行规则。
 
+默认通过独立隐藏 PowerShell 进程启动，原 BAT 命令窗口退出，桌面程序保持正常显示。后台输出重定向到 `%LOCALAPPDATA%\YuketangHelperLauncher\logs`，失败时显示错误弹窗；`-ShowConsole` 保留前台日志，`-CheckOnly` 保留 JSON 输出。不要把桌面程序本身设为隐藏，也不要隐藏用户整个 Windows Terminal 的其他标签。
+
 在核心工程目录执行：
 
 ```powershell

@@ -3,6 +3,8 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
+  readdir,
   rm,
   unlink,
   utimes,
@@ -139,5 +141,63 @@ describe.runIf(process.platform === 'win32')('Windows quick launcher', () => {
   it('reports missing dependencies without hanging on pause in check mode', async () => {
     const { root } = await fixture(false);
     await expect(check(root)).rejects.toThrow(/npm ci/);
+  }, 20_000);
+  it('starts a detached hidden worker without retaining the BAT output stream', async () => {
+    const { root, project } = await fixture();
+    const desktop = join(project, 'apps/desktop');
+    const marker = join(desktop, 'started.json');
+    const localAppData = join(root, 'local-app-data');
+    // Node is a real executable that accepts the same "." entry argument. Its
+    // fixture writes a marker instead of opening a GUI or reading user data.
+    await copyFile(
+      process.execPath,
+      join(project, 'node_modules/electron/dist/electron.exe'),
+    );
+    await put(
+      join(desktop, 'package.json'),
+      JSON.stringify({ main: 'dist/main/index.cjs' }),
+    );
+    await put(
+      join(desktop, 'dist/main/index.cjs'),
+      `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '{}'); console.error('fixture diagnostic');`,
+      buildTime,
+    );
+    const command = `""${join(root, '启动雨课堂助手.bat')}""`;
+    const { stdout, stderr } = await exec(
+      'cmd.exe',
+      ['/d', '/s', '/c', command],
+      {
+        windowsVerbatimArguments: true,
+        windowsHide: true,
+        timeout: 15_000,
+        env: { ...process.env, LOCALAPPDATA: localAppData },
+      },
+    );
+    expect(stdout).toBe('');
+    expect(stderr).toBe('');
+    const deadline = Date.now() + 10_000;
+    let started = false;
+    while (Date.now() < deadline) {
+      try {
+        await readFile(marker);
+        started = true;
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+    expect(started).toBe(true);
+    // Allow the worker's short exit check/transcript to finish before cleanup.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const logs = await readdir(
+      join(localAppData, 'YuketangHelperLauncher/logs'),
+    );
+    const errorLog = logs.find((name) => name.endsWith('-desktop-error.log'))!;
+    expect(
+      await readFile(
+        join(localAppData, 'YuketangHelperLauncher/logs', errorLog),
+        'utf8',
+      ),
+    ).toContain('fixture diagnostic');
   }, 20_000);
 });

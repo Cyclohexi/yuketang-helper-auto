@@ -1,6 +1,8 @@
 ﻿param(
   [switch]$CheckOnly,
-  [switch]$Rebuild
+  [switch]$Rebuild,
+  [switch]$ShowConsole,
+  [switch]$Worker
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +46,24 @@ function Test-SourceBuildRequired {
 }
 
 try {
+  # Start the worker in its own hidden console. The original BAT can then exit
+  # without Electron keeping a Windows Terminal tab open through inherited I/O.
+  if (-not $CheckOnly -and -not $ShowConsole -and -not $Worker) {
+    $workerArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Worker')
+    if ($Rebuild) { $workerArguments += '-Rebuild' }
+    Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $workerArguments -WindowStyle Hidden
+    exit 0
+  }
+  if ($Worker -and -not $CheckOnly) {
+    $logDirectory = Join-Path $env:LOCALAPPDATA 'YuketangHelperLauncher\logs'
+    # Keep logs separate so a first launch cannot pre-create the data profile
+    # and accidentally bypass its one-time configuration migration.
+    [void](New-Item -ItemType Directory -Path $logDirectory -Force)
+    $runId = (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '-' + $PID
+    $launcherLog = Join-Path $logDirectory ($runId + '-launcher.log')
+    Start-Transcript -LiteralPath $launcherLog -Force | Out-Null
+    $transcribing = $true
+  }
   $plan = $null
   # The source launcher always prefers the source build over an older ZIP build.
   if (Test-Path -LiteralPath $electronPath -PathType Leaf) {
@@ -94,13 +114,29 @@ try {
   # parentheses, ampersands, and exclamation marks.
   $startOptions = @{ FilePath = $plan.executable; WorkingDirectory = $plan.workingDirectory; WindowStyle = 'Normal'; PassThru = $true }
   if ($plan.mode -eq 'source') { $startOptions.ArgumentList = '.' }
+  if ($Worker) {
+    $startOptions.RedirectStandardOutput = Join-Path $logDirectory ($runId + '-desktop-out.log')
+    $startOptions.RedirectStandardError = Join-Path $logDirectory ($runId + '-desktop-error.log')
+  }
   $process = Start-Process @startOptions
+  # Windows PowerShell otherwise loses the exit code for fast-exiting
+  # processes, including Electron's successful second-instance handoff.
+  $null = $process.Handle
   if ($process.WaitForExit(1000) -and $process.ExitCode -ne 0) {
     throw "程序启动失败，退出码：$($process.ExitCode)。"
   }
   Write-Host '启动请求已发出。'
   exit 0
 } catch {
-  [Console]::Error.WriteLine('启动失败：' + $_.Exception.Message)
+  $failureMessage = '启动失败：' + $_.Exception.Message
+  if ($Worker) { Write-Host $failureMessage -ForegroundColor Red }
+  else { [Console]::Error.WriteLine($failureMessage) }
+  if ($Worker -and -not $CheckOnly) {
+    if ($launcherLog) { $failureMessage += "`r`n`r`n详细日志：$launcherLog" }
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($failureMessage, '雨课堂助手启动失败', 'OK', 'Error')
+  }
   exit 1
+} finally {
+  if ($transcribing) { Stop-Transcript | Out-Null }
 }
