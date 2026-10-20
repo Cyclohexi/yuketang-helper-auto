@@ -4,6 +4,31 @@ Windows 便携版现支持应用内检查、下载和重启更新。完整流程
 
 当前已完成 `coding_plan.md` 的 M0 至 M6 与 M8，M7 暂时跳过。程序可在独立的 `WebContentsView` 中登录和浏览雨课堂，观察、脱敏和导出网络记录；连接课堂时由官方页面完成签到和 WebSocket 建链，Backend 旁路收集课件与题目事件，并通过统一 Facade 验证和提交答案。设置、用户、日志、课件索引及 AI 建议审计记录可在重启后恢复。
 
+## 工程结构
+
+工程使用 npm workspaces 管理以下目录，桌面端采用 Electron、Vue 3、TypeScript 和 Vite。
+
+```text
+ykt-helper-win/
+├── apps/
+│   ├── desktop/
+│   │   ├── main/             # Electron 主进程、浏览器与课程自动化
+│   │   ├── preload/          # 受限 IPC 通信桥梁
+│   │   └── renderer/         # Vue 用户界面
+│   └── cli/                  # JSON 命令行入口
+├── packages/
+│   ├── contracts/            # 共享类型、事件和通信契约
+│   ├── backend/              # 课堂、题目、AI 与业务工作流
+│   ├── routing/              # 平台接口、会话与网络事件解析
+│   └── storage/              # 数据库、凭据和资源缓存
+├── desktop/                  # 便携发行包组装与 Forge 配置
+├── scripts/                  # 构建检查、回放和发布工具
+├── tests/                    # 契约测试与样本数据
+└── docs/                     # 专题说明和架构决策记录
+```
+
+源码在 `apps/` 与 `packages/` 中维护；`desktop/main`、`desktop/preload`、`desktop/renderer` 和 `desktop/cli` 由构建流程生成。
+
 ## 开发命令
 
 使用 Node.js 24.x、npm 11.x，在 `ykt-helper-win` 目录执行：

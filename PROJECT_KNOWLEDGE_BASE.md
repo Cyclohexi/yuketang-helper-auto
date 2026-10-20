@@ -272,6 +272,8 @@ npm run release:upload
    项目当前根目录位于 `E:\MyProject\yuketang-helper-auto`。如果修改了目录结构或启动参数，必须同步检查并确保 `启动雨课堂助手.bat` 能够正常拉起应用。
 5. 🤝 **尊重开源归属与规范**：
    在任何对外文档或界面中，必须保留对上游先驱开源项目的致谢声明（`ZaytsevZY/yuketang-helper-auto`, `Niuwh/yuketang-jiaoben`, `hotwords123/yuketang-helper`, `OneTHU`），并保留学术研究免责声明。
+6. 📖 **README 的功能分组**：
+   首页当前只设置“自动刷课”和“课堂自动化”两个核心功能板块。前者包含视频、讨论及课程单元流转；后者包含自动答题、课件下载、当前课堂课件与题目预览等。以后确有新增类别时，再增加同级板块。下载和三步上手前置，最新版本展开、旧版本折叠；详细开发文档放在 `ykt-helper-win/README.md`。
 
 ---
 
