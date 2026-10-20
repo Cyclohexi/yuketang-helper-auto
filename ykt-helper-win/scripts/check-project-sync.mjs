@@ -85,7 +85,7 @@ for (const path of packagePaths.slice(1)) {
 const rules = [
   {
     source: /^ykt-helper-win\/(?:apps|packages)\/.*\.(?:ts|vue|css)$/,
-    docs: ['changelog.md'],
+    docsAnyOf: ['changelog.md', 'ykt-helper-win/docs/development-changelog.md'],
   },
   {
     source:
@@ -108,10 +108,16 @@ const rules = [
   },
 ];
 const required = new Set();
-for (const path of changed) {
-  if (/\.(?:test|spec)\.ts$/.test(path)) continue;
-  for (const rule of rules)
-    if (rule.source.test(path)) for (const doc of rule.docs) required.add(doc);
+for (const rule of rules) {
+  const applies = [...changed].some(
+    (path) => !/\.(?:test|spec)\.ts$/.test(path) && rule.source.test(path),
+  );
+  if (!applies) continue;
+  for (const doc of rule.docs ?? []) required.add(doc);
+  if (rule.docsAnyOf && !rule.docsAnyOf.some((doc) => changed.has(doc)))
+    issues.push(
+      `本次改动需按发布范围同步任一记录：${rule.docsAnyOf.join(' 或 ')}`,
+    );
 }
 for (const doc of required)
   if (!changed.has(doc)) issues.push(`本次改动需同步基本说明：${doc}`);
