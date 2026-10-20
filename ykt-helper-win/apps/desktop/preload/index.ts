@@ -1,4 +1,5 @@
 import type { AssignmentDetail, AssignmentAsset } from '@ykt/contracts';
+import type { AppUpdateState } from '@ykt/contracts';
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   IpcChannel,
@@ -44,6 +45,23 @@ import {
 } from '@ykt/contracts';
 
 const api: DesktopApi = Object.freeze({
+  getAppUpdateState: () =>
+    ipcRenderer.invoke(IpcChannel.GetAppUpdateState) as Promise<AppUpdateState>,
+  checkAppUpdate: () =>
+    ipcRenderer.invoke(IpcChannel.CheckAppUpdate) as Promise<AppUpdateState>,
+  downloadAppUpdate: () =>
+    ipcRenderer.invoke(IpcChannel.DownloadAppUpdate) as Promise<AppUpdateState>,
+  installAppUpdate: () =>
+    ipcRenderer.invoke(IpcChannel.InstallAppUpdate) as Promise<AppUpdateState>,
+  onAppUpdateStateChanged: (listener: (state: AppUpdateState) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      state: AppUpdateState,
+    ) => listener(state);
+    ipcRenderer.on(IpcChannel.AppUpdateStateChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(IpcChannel.AppUpdateStateChanged, handler);
+  },
   getRuntimeStatus: () =>
     ipcRenderer.invoke(IpcChannel.GetRuntimeStatus) as Promise<RuntimeStatus>,
   getSettings: () =>

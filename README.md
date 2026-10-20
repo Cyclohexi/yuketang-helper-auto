@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-blue.svg" alt="Platform">
   </a>
   <a href="#">
-    <img src="https://img.shields.io/badge/Tests-39%20Suites%20%7C%20368%20Passed-success.svg" alt="Tests">
+    <img src="https://img.shields.io/badge/Tests-42%20Suites%20%7C%20389%20Passed-success.svg" alt="Tests">
   </a>
   <a href="https://github.com/Cyclohexi/yuketang-helper-auto/pulls">
     <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome">
@@ -27,6 +27,7 @@
 </p>
 
 <p align="center">
+  <a href="#version-history">📝 版本更新记录</a> •
   <a href="#-快速上手-quick-start">⚡ 快速上手</a> •
   <a href="#-功能一课堂助手与原版核心功能">🎯 功能一：课堂助手与原版功能</a> •
   <a href="#-功能二自动刷课助手">⚡ 功能二：自动刷课助手</a> •
@@ -49,6 +50,34 @@
 > 1. 本项目仅供技术学习、前端逆向工程与自动化测试学术研究交流。
 > 2. 使用大模型 AI 辅助答题可能消耗相应厂商的 Token / API 费用，请合理配置额度。
 > 3. 本项目完全本地化运行，所有配置均存储在本地，不收集、不上报任何用户隐私与凭据。
+
+---
+
+<a id="version-history"></a>
+
+## 📝 版本更新记录
+
+每次发布的更新内容都会在这里记录，最新版本排在最前面。完整发行文件见 [GitHub Releases](https://github.com/Cyclohexi/yuketang-helper-auto/releases)。
+
+### v2.2.0 · 自动更新（2026-10-20）
+
+**第二个 Release，也是首次功能更新。**
+
+- **新增自动检查更新**：程序启动后检查新版，运行期间每 6 小时再次检查，也可点击顶部版本按钮手动检查。
+- **支持应用内下载和重启更新**：发现新版后直接在助手内下载，确认重启后完成替换，无需每次打开 GitHub 下载。
+- **保留本地数据**：更新时保留登录状态、模型配置和 `ykt-helper-data` 中的数据。
+- **增加更新包校验与失败回滚**：下载后校验文件大小和 SHA-256，普通文件替换失败时尝试恢复原程序。
+- **继续提供 Windows x64 ZIP 便携版**：解压即可使用。
+
+> **旧版用户注意**：v2.1.0 及更早版本没有更新功能，需要先手动升级到 v2.2.0 一次。升级前关闭旧程序，将原来的 `ykt-helper-data` 文件夹保留并放在新版程序旁；后续版本即可使用应用内更新。
+
+[下载 v2.2.0 便携版](https://github.com/Cyclohexi/yuketang-helper-auto/releases/download/v2.2.0/YuketangHelper-v2.2.0-Windows-x64-Portable.zip) · [本次发布说明](https://github.com/Cyclohexi/yuketang-helper-auto/releases/tag/v2.2.0)
+
+### v2.1.0 · 首个 Release（2026-10-18）
+
+首个公开发行版本，提供课堂助手与课程自动化功能，包括自动定位未完成单元、视频静音及倍速播放、讨论区互动等，并提供 Windows x64 便携包。
+
+[查看 v2.1.0](https://github.com/Cyclohexi/yuketang-helper-auto/releases/tag/v2.1.0)
 
 ---
 
@@ -98,18 +127,20 @@
 
 ## ⚡ 快速上手 (Quick Start)
 
+自 v2.2.0 起，便携版支持应用内更新：启动后自动检查，顶部版本按钮可下载并重启更新，保留本地数据。现有旧版用户需要先手动更新到 v2.2.0 一次，后续可直接在应用内更新。维护者发布流程见[自动更新说明](ykt-helper-win/docs/auto-update.md)。
+
 ### 方式一：下载 Windows 绿色便携免安装版（强烈推荐普通用户）
 
 > 💡 **无需安装 Node.js、npm 或 Python，解压即用！**
 
 1. **前往下载**：
    在 [GitHub Releases 页面](https://github.com/Cyclohexi/yuketang-helper-auto/releases) 下载最新发行版：
-   - 👉 **[点击直接下载 YuketangHelper-v2.1.0-Windows-x64-Portable.zip](https://github.com/Cyclohexi/yuketang-helper-auto/releases/download/v2.1.0/YuketangHelper-v2.1.0-Windows-x64-Portable.zip)**
+   - 👉 **[点击直接下载 YuketangHelper-v2.2.0-Windows-x64-Portable.zip](https://github.com/Cyclohexi/yuketang-helper-auto/releases/download/v2.2.0/YuketangHelper-v2.2.0-Windows-x64-Portable.zip)**
 2. **解压文件**：
    将下载好的 `.zip` 压缩包解压到本地任意目录（例如 `D:\Tools\YuketangHelper`）。
    > 📌 **建议**：请勿解压在带有只读属性或需管理员权限的根目录下（如 `C:\Program Files`）。
 3. **启动运行**：
-   打开解压后的文件夹，双击运行 **`雨课堂助手.exe`** 即可立即使用！数据将自动保存在同目录的 `ykt-helper-data` 文件夹内，绿色便携纯净。
+   打开解压后的文件夹，双击运行 **`YuketangHelper.exe`**（或已改名的 `雨课堂助手.exe`）即可立即使用！数据将自动保存在同目录的 `ykt-helper-data` 文件夹内，绿色便携纯净。
 
 ---
 
@@ -180,7 +211,7 @@ cd ykt-helper-win
 # 2. 安装项目依赖
 npm ci --include=dev --include=optional
 
-# 3. 运行自动化契约测试 (39 Suites | 368 Tests)
+# 3. 运行自动化测试 (42 Suites | 389 Passed)
 npm test
 
 # 4. 构建渲染前端
@@ -194,8 +225,9 @@ npm start
 
 ```bash
 cd ykt-helper-win
-npm run build:win:dir
-# 生成的解压即用免安装包将位于 dist/win-unpacked/
+npm run make:portable
+npm run release:prepare
+# 便携包和更新清单位于 desktop/out/release/v<版本>/
 ```
 
 ---

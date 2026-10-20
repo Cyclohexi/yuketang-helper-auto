@@ -11,6 +11,7 @@ import {
 import AssistantPanel from './components/AssistantPanel.vue';
 import { assignmentCollection } from './assignment-collection';
 import NetworkLab from './components/NetworkLab.vue';
+import AppUpdateControl from './components/AppUpdateControl.vue';
 
 type WorkspacePage =
   | 'assignments'
@@ -246,6 +247,7 @@ async function navigateAddress(): Promise<void> {
             <path d="M12 5v14M5 12h14" />
           </svg>
         </button>
+        <AppUpdateControl />
       </div>
 
       <div class="browser-row">

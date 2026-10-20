@@ -24,8 +24,8 @@
   *原仓库提供了基于 Electron 的桌面客户端底座、雨课堂 WebSocket 旁路报文监听、课堂监控与作业解析的基础架构。*
 - **当前项目仓库**：[Cyclohexi/yuketang-helper-auto](https://github.com/Cyclohexi/yuketang-helper-auto)  
   *本项目在原版基础上进行了全面二次开发与能力强化，自研了**课堂实时自动答题**、**多模态视觉 Vision AI 搜题**与**全自动智能刷课流水线**（智能自动定位、自动静音二倍速、自动讨论跟帖等）。*
-- **当前发行版本**：`v2.1.0`（GitHub Releases 已正式发布）
-- **核心发布物**：`YuketangHelper-v2.1.0-Windows-x64-Portable.zip`（**仅提供绿色免安装便携版**，已彻底废弃 Setup 安装包）
+- **当前发行版本**：`v2.2.0`（第二个 Release，首次功能更新：自动更新；2026-10-20）
+- **核心发布物**：`YuketangHelper-v2.2.0-Windows-x64-Portable.zip`，以及客户端读取的 `update-win32-x64.json`（**仅发布绿色便携版及更新清单**）。
 
 ### 1.2 本地工作环境
 - **本地代码绝对路径**：`E:\MyProject\yuketang-helper-auto`
@@ -180,6 +180,16 @@ ykt-helper-win/
 
 ## 5. 已完成的历史改动记录
 
+### 2026-10-20：v2.2.0 自动更新
+
+- 新增启动 15 秒后及每 6 小时检查更新、顶部版本按钮、应用内下载及确认重启更新。
+- 便携更新包含大小与 SHA-256 校验、预解压、危险路径检查、保留本地数据和普通复制失败回滚。
+- 所有工作区版本统一为 2.2.0；42 套测试通过，389 项通过、1 项跳过。
+- 新增 `version:set`、`release:prepare`、`release:upload` 命令。正式发行只上传便携 ZIP 和更新清单；带 `--publish` 参数时，完整上传并校验后发布。
+- README 新增“版本更新记录”，本次为第二个 Release、首次功能更新。发布说明位于 `ykt-helper-win/docs/release-notes-v2.2.0.md`。
+- v2.1.0 用户需要先手动升级到 v2.2.0 一次，此后使用应用内更新。
+- 全量 lint 在未修改的 `course-brush-controller.ts` 中仍有 27 项既有问题；本次新增及修改代码检查通过。
+
 在本次会话周期内，完成的重大演进与修复包括：
 
 1. **刷课控制器逻辑修复与单测修复**：
@@ -231,11 +241,12 @@ npm run build
 # 启动本地开发调试桌面端
 npm start
 
-# 构建 Windows 绿色便携版目录 (输出至 dist/win-unpacked/)
-npm run build:win:dir
+# 打包绿色便携版并生成更新清单
+npm run make:portable
+npm run release:prepare
 
-# 打包绿色免安装压缩包 (生成 YuketangHelper-v2.1.0-Windows-x64-Portable.zip)
-node scripts/package-win-portable.mjs
+# 提交并推送版本标签后，上传草稿；明确发布使用 -- --publish
+npm run release:upload
 ```
 
 ### 6.3 Commit 提交信息规范

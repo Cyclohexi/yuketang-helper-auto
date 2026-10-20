@@ -6,3 +6,5 @@ desktop/main/
 desktop/preload/
 desktop/renderer/
 desktop/out/
+!docs/auto-update.md
+!docs/release-notes-*.md

@@ -6,11 +6,13 @@ import { dirname, join } from 'node:path';
 
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   dialog,
   ipcMain,
   Menu,
   Notification,
+  net,
   powerSaveBlocker,
   shell,
   type WebContents,
@@ -60,6 +62,7 @@ import { createNetworkRecorderForDesktop } from './network-recorder-factory.js';
 import { PersistentNetworkArchive } from './persistent-network-archive.js';
 import { isSourceModuleId, sourceModulePath } from './source-modules.js';
 import { CourseBrushController } from './course-brush-controller.js';
+import { AppUpdateController } from './app-update-controller.js';
 
 let assignmentAssets: AssignmentAssets | undefined;
 let assignmentAnswerPending = false;
@@ -70,6 +73,7 @@ let networkLabController: NetworkLabController | undefined;
 let webProbeController: WebProbeController | undefined;
 let courseBrushController: CourseBrushController | undefined;
 let cliServer: DesktopCliServer | undefined;
+let appUpdates: AppUpdateController | undefined;
 let serviceCleanupPromise: Promise<void> | undefined;
 let quitAfterCleanup = false;
 let keepScreenAwake = false;
@@ -122,6 +126,18 @@ function isTrustedRenderer(sender: WebContents, senderUrl: string): boolean {
 }
 
 function registerIpc(): void {
+  const updateHandlers = [
+    [IpcChannel.GetAppUpdateState, () => appUpdates!.getState()],
+    [IpcChannel.CheckAppUpdate, () => appUpdates!.check()],
+    [IpcChannel.DownloadAppUpdate, () => appUpdates!.download()],
+    [IpcChannel.InstallAppUpdate, () => appUpdates!.install()],
+  ] as const;
+  for (const [channel, handler] of updateHandlers) {
+    ipcMain.handle(channel, (event) => {
+      assertTrustedIpc(event.sender, event.senderFrame?.url ?? '');
+      return handler();
+    });
+  }
   ipcMain.handle(IpcChannel.GetRuntimeStatus, async (event) => {
     if (!isTrustedRenderer(event.sender, event.senderFrame?.url ?? '')) {
       throw new Error('IPC request rejected.');
@@ -992,10 +1008,7 @@ async function createWindow(): Promise<void> {
     () => getRuntime().facade,
     (brushState) => {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-        window.webContents.send(
-          IpcChannel.CourseBrushStateChanged,
-          brushState,
-        );
+        window.webContents.send(IpcChannel.CourseBrushStateChanged, brushState);
       }
     },
   );
@@ -1063,6 +1076,7 @@ async function createWindow(): Promise<void> {
     new ElectronSafeStorageCodec(),
   );
   const nextRuntime = createBackendRuntime({
+    version: app.getVersion(),
     dataStore,
     resourceCache,
     secretStore,
@@ -1159,8 +1173,50 @@ if (hasSingleInstanceLock) {
     .whenReady()
     .then(async () => {
       Menu.setApplicationMenu(null);
+      const executable = app.getPath('exe');
+      const portable =
+        process.argv.includes('--portable') ||
+        existsSync(join(dirname(executable), 'portable.flag'));
+      const installed = existsSync(
+        join(dirname(dirname(executable)), 'Update.exe'),
+      );
+      const mode =
+        !app.isPackaged ||
+        process.platform !== 'win32' ||
+        process.arch !== 'x64'
+          ? 'unsupported'
+          : portable
+            ? 'portable'
+            : installed
+              ? 'installed'
+              : 'unsupported';
+      if (mode === 'installed')
+        app.setAppUserModelId('com.squirrel.YuketangHelper.YuketangHelper');
+      appUpdates = new AppUpdateController({
+        version: app.getVersion(),
+        mode,
+        executable,
+        directory: join(app.getPath('userData'), 'updates'),
+        fetch: (url, init) => net.fetch(url, { ...init, credentials: 'omit' }),
+        nativeUpdater: autoUpdater,
+        onState: (state) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(
+              IpcChannel.AppUpdateStateChanged,
+              state,
+            );
+          }
+        },
+        beforeInstall: async () => {
+          courseBrushController?.stop();
+          await cleanupServices();
+          quitAfterCleanup = true;
+        },
+        quit: () => app.quit(),
+      });
       registerIpc();
       await createWindow();
+      void appUpdates.start().catch(reportStartupError);
 
       app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) {
@@ -1197,7 +1253,10 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (quitAfterCleanup) return;
+  if (quitAfterCleanup) {
+    appUpdates?.dispose();
+    return;
+  }
   event.preventDefault();
   void cleanupServices().finally(() => {
     quitAfterCleanup = true;

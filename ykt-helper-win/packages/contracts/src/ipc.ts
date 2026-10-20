@@ -1,4 +1,5 @@
 import type { AssignmentDetail, AssignmentAsset } from './assignment-detail.js';
+import type { AppUpdateState } from './updates.js';
 import type {
   CourseBrushAiResult,
   CourseBrushConfig,
@@ -46,6 +47,11 @@ import type {
 } from './network.js';
 
 export const IpcChannel = {
+  GetAppUpdateState: 'updates:get-state',
+  CheckAppUpdate: 'updates:check',
+  DownloadAppUpdate: 'updates:download',
+  InstallAppUpdate: 'updates:install',
+  AppUpdateStateChanged: 'updates:state-changed',
   GetRuntimeStatus: 'runtime:get-status',
   GetSettings: 'storage:get-settings',
   UpdateSettings: 'storage:update-settings',
@@ -123,6 +129,13 @@ export const IpcChannel = {
 } as const;
 
 export interface DesktopApi {
+  getAppUpdateState(): Promise<AppUpdateState>;
+  checkAppUpdate(): Promise<AppUpdateState>;
+  downloadAppUpdate(): Promise<AppUpdateState>;
+  installAppUpdate(): Promise<AppUpdateState>;
+  onAppUpdateStateChanged(
+    listener: (state: AppUpdateState) => void,
+  ): () => void;
   getRuntimeStatus(): Promise<RuntimeStatus>;
   getSettings(): Promise<AppSettings>;
   updateSettings(settings: Partial<AppSettings>): Promise<AppSettings>;
@@ -222,7 +235,9 @@ export interface DesktopApi {
   pauseCourseBrush(): Promise<CourseBrushState>;
   stopCourseBrush(): Promise<CourseBrushState>;
   clearCourseBrushLogs(): Promise<CourseBrushState>;
-  probeCourseBrushPage(captureScreenshot?: boolean): Promise<CourseBrushPageProbe>;
+  probeCourseBrushPage(
+    captureScreenshot?: boolean,
+  ): Promise<CourseBrushPageProbe>;
   solveCurrentBrushQuestion(submit?: boolean): Promise<CourseBrushAiResult>;
   solveAllBrushQuestionsOnPage(): Promise<CourseBrushState>;
   openCourseBrushSandbox(

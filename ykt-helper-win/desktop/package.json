@@ -1,7 +1,7 @@
 {
   "name": "yuketang-helper-desktop-package",
   "productName": "雨课堂助手",
-  "version": "2.0.0",
+  "version": "2.2.0",
   "private": true,
   "description": "雨课堂助手 Windows 桌面端",
   "author": "Yuketang Helper contributors",

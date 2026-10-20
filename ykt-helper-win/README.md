@@ -1,5 +1,7 @@
 # 雨课堂助手桌面版
 
+Windows 便携版现支持应用内检查、下载和重启更新。完整流程及发布所需附件见[自动更新说明](docs/auto-update.md)。
+
 当前已完成 `coding_plan.md` 的 M0 至 M6 与 M8，M7 暂时跳过。程序可在独立的 `WebContentsView` 中登录和浏览雨课堂，观察、脱敏和导出网络记录；连接课堂时由官方页面完成签到和 WebSocket 建链，Backend 旁路收集课件与题目事件，并通过统一 Facade 验证和提交答案。设置、用户、日志、课件索引及 AI 建议审计记录可在重启后恢复。
 
 ## 开发命令
@@ -244,15 +246,15 @@ M8 将模型调用收敛到统一 `AiProviderPlugin` 接口，默认提供 OpenA
 `desktop/` 是 Electron Forge 的完整应用目录。根目录脚本会先构建桌面端与单文件 CLI，再把运行文件同步到该目录并生成发行物：
 
 ```powershell
-npm run make:win
 npm run make:portable
+npm run release:prepare
 ```
 
-安装版使用 Squirrel.Windows，Portable 使用 ZIP。运行桌面端后，可通过应用根目录中的 `ykt.cmd` 执行 `status` 等 desktop-attached CLI 命令。Portable 会把 Cookie、缓存和应用数据写到可执行文件旁的 `ykt-helper-data`。
+正式发行物使用 ZIP 便携包。运行桌面端后，可通过应用根目录中的 `ykt.cmd` 执行 `status` 等 desktop-attached CLI 命令。便携版会把 Cookie、缓存和应用数据写到可执行文件旁的 `ykt-helper-data`。
 
 若当前网络无法访问 GitHub 的 Electron 分发地址，可在构建终端临时指定镜像后重试：
 
 ```powershell
 $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
-npm run make:win
+npm run make:portable
 ```

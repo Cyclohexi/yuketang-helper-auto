@@ -568,6 +568,7 @@ class BaselineFacade implements YuketangFacade {
 }
 
 export interface BackendRuntimeOptions {
+  version?: string;
   routing?: RoutingService;
   store?: KeyValueStore;
   lessons?: LessonRepository;
@@ -581,6 +582,7 @@ export interface BackendRuntimeOptions {
 }
 
 export class BackendRuntime {
+  readonly #version: string;
   readonly facade: YuketangFacade;
   readonly store: KeyValueStore;
   readonly lessons: LessonRepository;
@@ -591,6 +593,7 @@ export class BackendRuntime {
   #running = false;
 
   constructor(options: BackendRuntimeOptions = {}) {
+    this.#version = options.version ?? VERSION;
     this.store = options.store ?? new MemoryKeyValueStore();
     this.dataStore = options.dataStore ?? new MemoryAppDataStore();
     this.resourceCache = options.resourceCache;
@@ -648,7 +651,7 @@ export class BackendRuntime {
   private status(): RuntimeStatus {
     return {
       state: this.#running ? 'running' : 'stopped',
-      version: VERSION,
+      version: this.#version,
       capabilities: [
         'status',
         'lessons',

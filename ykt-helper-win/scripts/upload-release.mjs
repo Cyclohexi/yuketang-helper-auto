@@ -1,161 +1,172 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(__dirname, '..');
-
-function getGitToken() {
-  const output = execSync('git credential fill', {
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const repository = 'Cyclohexi/yuketang-helper-auto';
+const { version } = JSON.parse(
+  await readFile(join(root, 'desktop/package.json'), 'utf8'),
+);
+if (!/^\d+\.\d+\.\d+$/.test(version))
+  throw new Error('A stable release version is required.');
+const tag = `v${version}`;
+const directory = join(root, 'desktop/out/release', tag);
+const names = [
+  `YuketangHelper-v${version}-Windows-x64-Portable.zip`,
+  'update-win32-x64.json',
+];
+if (process.argv.slice(2).some((argument) => argument !== '--publish')) {
+  throw new Error('Usage: npm run release:upload -- [--publish]');
+}
+const publish = process.argv.includes('--publish');
+const notes = await readFile(
+  join(root, `docs/release-notes-${tag}.md`),
+  'utf8',
+);
+const title = notes.split(/\r?\n/)[0].replace(/^#\s*/, '').trim();
+const manifest = JSON.parse(
+  await readFile(join(directory, 'update-win32-x64.json'), 'utf8'),
+);
+const hashes = new Map();
+for (const name of names) {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(join(directory, name)))
+    hash.update(chunk);
+  hashes.set(name, `sha256:${hash.digest('hex')}`);
+}
+if (
+  manifest.version !== version ||
+  manifest.file !== names[0] ||
+  manifest.size !== (await stat(join(directory, names[0]))).size ||
+  `sha256:${manifest.sha256}` !== hashes.get(names[0])
+) {
+  throw new Error('Portable package does not match its update manifest.');
+}
+const files = await readdir(directory);
+for (const name of names) {
+  if (!files.includes(name))
+    throw new Error(`Missing ${name}; run npm run release:prepare first.`);
+}
+function getToken() {
+  if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
+    return process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+  const output = execFileSync('git', ['credential', 'fill'], {
     input: 'protocol=https\nhost=github.com\n\n',
     encoding: 'utf8',
+    windowsHide: true,
   });
-  const match = output.match(/password=(.+)/);
-  if (!match) throw new Error('Cannot find token in git credential fill');
-  return match[1].trim();
+  const token = /^password=(.+)$/m.exec(output)?.[1]?.trim();
+  if (!token) throw new Error('Set GH_TOKEN or configure GitHub credentials.');
+  return token;
 }
-
-async function githubRequest(url, options = {}) {
-  const token = getGitToken();
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    'User-Agent': 'YuketangHelperReleaseUploader/1.0',
-    Accept: 'application/vnd.github.v3+json',
-    ...(options.headers || {}),
-  };
-  const res = await fetch(url, { ...options, headers });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub API Error ${res.status} ${res.statusText} for ${url}: ${text}`);
-  }
-  return res.json();
+const token = getToken();
+const headers = {
+  Authorization: `Bearer ${token}`,
+  Accept: 'application/vnd.github+json',
+  'User-Agent': 'YuketangHelperReleaseUploader',
+};
+async function request(path, init = {}) {
+  const response = await fetch(
+    `https://api.github.com/repos/${repository}${path}`,
+    { ...init, headers: { ...headers, ...init.headers } },
+  );
+  if (!response.ok)
+    throw new Error(`GitHub request failed: HTTP ${response.status}`);
+  return response.json();
 }
-
-async function uploadAsset(uploadUrlTemplate, filePath, assetName) {
-  const token = getGitToken();
-  const stats = fs.statSync(filePath);
-  const size = stats.size;
-  const uploadUrl = uploadUrlTemplate.replace(/\{\?name,label\}/, `?name=${encodeURIComponent(assetName)}`);
-
-  console.log(`[Upload] Uploading ${assetName} (${(size / 1024 / 1024).toFixed(2)} MB)...`);
-
-  const fileStream = fs.createReadStream(filePath);
-
-  const res = await fetch(uploadUrl, {
+// Upload a complete portable release as a draft. Only an explicit --publish
+// promotes it after both attachments have been verified.
+const lookup = await fetch(
+  `https://api.github.com/repos/${repository}/releases/tags/${tag}`,
+  { headers },
+);
+let release;
+if (lookup.ok) {
+  release = await lookup.json();
+  if (!release.draft)
+    throw new Error(
+      `${tag} is already public. Use a new version; public assets will not be overwritten.`,
+    );
+} else if (lookup.status === 404) {
+  await request(`/git/ref/tags/${tag}`);
+  release = await request('/releases', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'User-Agent': 'YuketangHelperReleaseUploader/1.0',
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': String(size),
-    },
-    body: fileStream,
-    duplex: 'half',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      tag_name: tag,
+      name: title,
+      body: notes,
+      draft: true,
+      prerelease: false,
+    }),
   });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to upload ${assetName}: ${res.status} ${res.statusText} - ${text}`);
-  }
-
-  const result = await res.json();
-  console.log(`[Success] ${assetName} uploaded successfully! Browser URL: ${result.browser_download_url}`);
-  return result;
-}
-
-async function main() {
-  const owner = 'Cyclohexi';
-  const repo = 'yuketang-helper-auto';
-  const tag = 'v2.1.0';
-
-  console.log(`[Release] Creating / Fetching release ${tag} on ${owner}/${repo}...`);
-
-  let release;
-  try {
-    release = await githubRequest(`https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}`);
-    console.log(`[Release] Release ${tag} already exists (ID: ${release.id})`);
-  } catch (err) {
-    console.log(`[Release] Release ${tag} does not exist yet, creating...`);
-    release = await githubRequest(`https://api.github.com/repos/${owner}/${repo}/releases`, {
-      method: 'POST',
-      body: JSON.stringify({
-        tag_name: tag,
-        target_commitish: 'main',
-        name: '雨课堂助手 v2.1.0 - 智能自动定位开刷与原生防抖版',
-        body: `## 🌟 雨课堂助手 v2.1.0 发布说明
-
-欢迎使用雨课堂助手桌面版 v2.1.0！本项目为广大同学和开发者提供了一键式的雨课堂自动化辅助体验，无需配置复杂的开发环境。
-
-### 🚀 本次更新重点：
-- **智能目录扫描与免缓存精确定位**：进入课程后自动分析章节树，秒级定位到第一个未完成的学习单元（无论讨论、视频或作业），无需依赖易失效的缓存；
-- **原生视频倍速防抖与锁定**：彻底消除页面自身频繁重置倍速的死循环，稳定维持所配置倍速；
-- **讨论区智能互动跟帖**：自动获取同班同学优质评论并填充，支持富文本 contenteditable 及防重复提交机制；
-- **免安装与一键安装程序**：无需安装 Node.js、npm 或 Python，开箱即用。
-
-### 📦 安装包下载：
-- **\`YuketangHelper-Setup.exe\`**：Windows 一键安装版，双击即可全自动安装并在桌面生成图标（推荐广大同学首选）。
-- **\`YuketangHelper-v2.1.0-Windows-x64-Portable.zip\`**：绿色便携免安装版，解压后双击 \`雨课堂助手.exe\` 直接运行，数据完全隔离在本地文件夹中。
-
----
-*本项目仅供技术交流与学习研究使用，遵循 MIT 开源协议。*`,
-        draft: false,
-        prerelease: false,
-      }),
-    });
-    console.log(`[Release] Release created with ID: ${release.id}`);
-  }
-
-  // Check existing assets and delete if duplicate
-  if (Array.isArray(release.assets)) {
-    for (const asset of release.assets) {
-      if (asset.name === 'YuketangHelper-Setup.exe' || asset.name === 'YuketangHelper-v2.1.0-Windows-x64-Portable.zip') {
-        console.log(`[Asset] Deleting existing asset ${asset.name} (ID: ${asset.id})...`);
-        const token = getGitToken();
-        await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/assets/${asset.id}`, {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'User-Agent': 'YuketangHelperReleaseUploader/1.0',
-          },
-        });
-      }
+} else throw new Error(`Cannot inspect release: HTTP ${lookup.status}`);
+for (const name of names) {
+  const existing = release.assets.find((asset) => asset.name === name);
+  if (existing) {
+    if (
+      existing.digest !== hashes.get(name) ||
+      existing.size !== (await stat(join(directory, name))).size
+    ) {
+      throw new Error(
+        `Draft asset ${name} differs from the local file. Inspect the draft before retrying.`,
+      );
     }
+    console.log(`Verified existing ${name}`);
+    continue;
   }
-
-  const setupExePath = path.join(
-    root,
-    'desktop',
-    'out',
-    'make',
-    'squirrel.windows',
-    'x64',
-    'YuketangHelper-Setup.exe',
+  const path = join(directory, name);
+  const response = await fetch(
+    `${release.upload_url.replace(/\{.*\}$/, '')}?name=${encodeURIComponent(name)}`,
+    {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String((await stat(path)).size),
+      },
+      body: createReadStream(path),
+      duplex: 'half',
+    },
   );
-  const portableZipPath = path.join(
-    root,
-    'desktop',
-    'out',
-    'make',
-    'YuketangHelper-v2.1.0-Windows-x64-Portable.zip',
-  );
-
-  if (fs.existsSync(setupExePath)) {
-    await uploadAsset(release.upload_url, setupExePath, 'YuketangHelper-Setup.exe');
-  } else {
-    console.error(`[Error] Setup file not found at ${setupExePath}`);
-  }
-
-  if (fs.existsSync(portableZipPath)) {
-    await uploadAsset(release.upload_url, portableZipPath, 'YuketangHelper-v2.1.0-Windows-x64-Portable.zip');
-  } else {
-    console.error(`[Error] Portable zip not found at ${portableZipPath}`);
-  }
-
-  console.log(`\n🎉 All assets uploaded successfully! Release URL: ${release.html_url}`);
+  if (!response.ok)
+    throw new Error(
+      `Upload ${name} failed: HTTP ${response.status}. Release remains a draft.`,
+    );
+  console.log(`Uploaded ${name}`);
 }
-
-main().catch((err) => {
-  console.error('[Fatal Error]', err);
-  process.exit(1);
-});
+const verified = await request(`/releases/${release.id}`);
+for (const name of names) {
+  const asset = verified.assets.find((item) => item.name === name);
+  if (
+    !asset ||
+    asset.digest !== hashes.get(name) ||
+    asset.size !== (await stat(join(directory, name))).size
+  ) {
+    throw new Error(
+      `Uploaded asset ${name} failed verification; release remains a draft.`,
+    );
+  }
+}
+if (verified.assets.some((asset) => !names.includes(asset.name))) {
+  throw new Error(
+    'Draft contains unexpected attachments. Only the portable ZIP and update manifest may be published.',
+  );
+}
+if (publish) {
+  release = await request(`/releases/${release.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: title,
+      body: notes,
+      draft: false,
+      prerelease: false,
+      make_latest: 'true',
+    }),
+  });
+  console.log(`Published: ${release.html_url}`);
+} else console.log(`Draft ready for review: ${release.html_url}`);
