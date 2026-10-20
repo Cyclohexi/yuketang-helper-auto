@@ -91,18 +91,31 @@ if (lookup.ok) {
       `${tag} is already public. Use a new version; public assets will not be overwritten.`,
     );
 } else if (lookup.status === 404) {
-  await request(`/git/ref/tags/${tag}`);
-  release = await request('/releases', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      tag_name: tag,
-      name: title,
-      body: notes,
-      draft: true,
-      prerelease: false,
-    }),
-  });
+  // The tag endpoint returns published releases; enumerate drafts separately
+  // so a retry after an interrupted upload cannot create a duplicate draft.
+  const candidates = await request('/releases?per_page=100');
+  const drafts = candidates.filter(
+    (item) => item.tag_name === tag && item.draft,
+  );
+  if (drafts.length > 1)
+    throw new Error(
+      `Multiple drafts found for ${tag}; inspect them before retrying.`,
+    );
+  if (drafts.length === 1) release = drafts[0];
+  else {
+    await request(`/git/ref/tags/${tag}`);
+    release = await request('/releases', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag_name: tag,
+        name: title,
+        body: notes,
+        draft: true,
+        prerelease: false,
+      }),
+    });
+  }
 } else throw new Error(`Cannot inspect release: HTTP ${lookup.status}`);
 for (const name of names) {
   const existing = release.assets.find((asset) => asset.name === name);
