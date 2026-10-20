@@ -27,16 +27,9 @@ import {
   systemClock,
   type Clock,
 } from '../workflows/lesson-state-machine.js';
-import {
-  AnswerService,
-  planSubmission,
-} from './answer-service.js';
+import { AnswerService, planSubmission } from './answer-service.js';
 import { ProblemService } from './problem-service.js';
-import {
-  getRealtimeEvent,
-  findEntity,
-  firstText,
-} from './classroom-events.js';
+import { getRealtimeEvent, findEntity, firstText } from './classroom-events.js';
 
 const simulationLessonId = 'local-classroom-simulator';
 const noticeDedupeWindow = 60_000;
@@ -49,6 +42,7 @@ export class ActiveLessonService {
   readonly #remoteLessons = new Map<string, ActiveLesson>();
   readonly #environments = new Map<string, BrowserEnvironment>();
   readonly #finishedLessons = new Set<string>();
+  readonly #startedLessons = new Set<string>();
   readonly #problems: ProblemService;
   readonly #answers = new AnswerService();
   readonly #stopArchivedCollection: () => void;
@@ -161,6 +155,7 @@ export class ActiveLessonService {
       (message) => this.handleMessage(lessonId, message),
       remote.presentationId,
     );
+    this.announceLessonStarted(lessonId);
     return connectedEnvironment;
   }
 
@@ -175,6 +170,12 @@ export class ActiveLessonService {
 
   async submitAnswer(input: AnswerInput): Promise<SubmissionResult> {
     const problem = this.#problems.getProblem(input.problemId);
+    if (problem.status === 'locked' && input.confirmedBy === 'agent') {
+      throw new YuketangError({
+        code: ErrorCode.InvalidArgument,
+        message: '题目尚未发布，只能预分析，不能提交答案。',
+      });
+    }
     const validation = this.#problems.validateAnswerFormat(input);
     if (!validation.valid || !validation.normalizedAnswer) {
       throw new YuketangError({
@@ -406,6 +407,16 @@ export class ActiveLessonService {
     }
     const event = getRealtimeEvent(message);
     if (!event) return;
+    if (event.kind === 'lessonstarted') {
+      if (session.lesson.status === 'ended') return;
+      machine.apply({
+        type: 'lesson.started',
+        lessonId,
+        occurredAt: this.clock.now(),
+      });
+      this.announceLessonStarted(lessonId);
+      return;
+    }
     if (event.kind === 'lessonfinished') {
       this.#finishedLessons.add(lessonId);
       this.#pendingUnlocks.delete(lessonId);
@@ -631,12 +642,7 @@ export class ActiveLessonService {
     if (machine.session.lesson.status === 'ended') return;
 
     const problemId =
-      firstText(message, [
-        'problemId',
-        'problem_id',
-        'problemid',
-        'id',
-      ]) ||
+      firstText(message, ['problemId', 'problem_id', 'problemid', 'id']) ||
       firstText(findEntity(message), [
         'problemId',
         'problem_id',
@@ -753,6 +759,7 @@ export class ActiveLessonService {
   }
 
   private async resetSimulation(): Promise<void> {
+    this.#startedLessons.delete(simulationLessonId);
     for (const key of this.#noticeTimes.keys()) {
       if (key.includes(simulationLessonId)) this.#noticeTimes.delete(key);
     }
@@ -762,6 +769,7 @@ export class ActiveLessonService {
       status: 'active',
     });
     this.#environments.set(simulationLessonId, 'standard');
+    this.announceLessonStarted(simulationLessonId);
     await this.applyPresentation('standard', simulationLessonId, {
       id: 'simulation-presentation',
       lessonId: simulationLessonId,
@@ -819,6 +827,25 @@ export class ActiveLessonService {
       publishedProblemIds: [],
       lastEvent: '模拟课堂已重置',
     };
+  }
+
+  private announceLessonStarted(lessonId: string): void {
+    const lesson = this.repository.getSession(lessonId)?.lesson;
+    if (
+      !lesson ||
+      lesson.status !== 'active' ||
+      this.#startedLessons.has(lessonId)
+    )
+      return;
+    this.#startedLessons.add(lessonId);
+    this.emitNotice({
+      kind: 'lesson-started',
+      lessonId,
+      dedupeKey: `lesson-started:${lessonId}`,
+      title: '课堂已开始',
+      detail: lesson.title,
+      occurredAt: this.clock.now(),
+    });
   }
 
   private emitNotice(notice: ClassroomNotice): void {

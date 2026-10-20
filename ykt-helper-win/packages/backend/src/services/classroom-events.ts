@@ -5,6 +5,7 @@ type RealtimeEvent =
   | { kind: 'unlockproblem'; problem: Record<string, unknown> }
   | { kind: 'answered'; problemId: string; answer: AnswerValue }
   | { kind: 'lessonfinished' }
+  | { kind: 'lessonstarted' }
   | {
       kind: 'publish';
       notice: Omit<ClassroomNotice, 'lessonId' | 'occurredAt'>;
@@ -21,7 +22,6 @@ const assessmentMarkers = [
   'paper',
 ];
 const coursewareMarkers = ['presentation', 'courseware', 'ppt', 'slide'];
-const publishAction = /^(send|publish|open|start|release)/;
 const assessmentPublishAction = /^(send|publish|start|release)/;
 const coursewarePublishAction = /^(send|publish|release)/;
 const nestedKeys = ['data', 'payload', 'result', 'content'];
@@ -72,6 +72,8 @@ export function getRealtimeEvent(
     return problemId && answer ? { kind: 'answered', problemId, answer } : null;
   }
   if (op === 'lessonfinished') return { kind: 'lessonfinished' };
+  if (['lessonstarted', 'lessonstart', 'startlesson'].includes(op))
+    return { kind: 'lessonstarted' };
 
   const category = publishCategory(op);
   if (!category) return null;
@@ -88,7 +90,6 @@ export function getRealtimeEvent(
   const title = {
     assessment: '考试/测试题组已发布',
     courseware: '课件已发布',
-    other: '课堂内容已发布',
   }[category];
   return {
     kind: 'publish',
@@ -102,9 +103,7 @@ export function getRealtimeEvent(
   };
 }
 
-function publishCategory(
-  op: string,
-): 'assessment' | 'courseware' | 'other' | null {
+function publishCategory(op: string): 'assessment' | 'courseware' | null {
   if (op === 'probleminfo') return 'assessment';
   if (assessmentMarkers.some((marker) => op.includes(marker))) {
     return assessmentPublishAction.test(op) ? 'assessment' : null;
@@ -112,7 +111,7 @@ function publishCategory(
   if (coursewareMarkers.some((marker) => op.includes(marker))) {
     return coursewarePublishAction.test(op) ? 'courseware' : null;
   }
-  return publishAction.test(op) ? 'other' : null;
+  return null;
 }
 
 function normalizeOp(message: Record<string, unknown>): string {
@@ -122,7 +121,9 @@ function normalizeOp(message: Record<string, unknown>): string {
     .replace(/[^a-z0-9]/g, '');
 }
 
-export function findEntity(message: Record<string, unknown>): Record<string, unknown> {
+export function findEntity(
+  message: Record<string, unknown>,
+): Record<string, unknown> {
   const queue: unknown[] = [message];
   const visited = new Set<object>();
   let fallback = message;

@@ -15,12 +15,12 @@ export interface AppSettings {
   readonly notifyProblemStarts: boolean;
   readonly notifyAssessmentPublishes: boolean;
   readonly notifyCoursewarePublishes: boolean;
-  readonly notifyOtherPublishes: boolean;
+  readonly notifyLessonStarted: boolean;
   readonly notifyLessonFinished: boolean;
-  readonly notifyAutoAnswerScheduled: boolean;
-  readonly notifyAutoAnswerStarted: boolean;
-  readonly notifyAutoAnswerSucceeded: boolean;
-  readonly notifyAutoAnswerFailed: boolean;
+  readonly notifyAiAnalysisStarted: boolean;
+  readonly notifyAiAnalysisFinished: boolean;
+  readonly notifyAnswerSucceeded: boolean;
+  readonly notifyAnswerFailed: boolean;
   readonly notifyNative: boolean;
   readonly notifyPopup: boolean;
   readonly notifySound: boolean;
@@ -53,12 +53,12 @@ export const DefaultAppSettings: AppSettings = Object.freeze({
   notifyProblemStarts: true,
   notifyAssessmentPublishes: true,
   notifyCoursewarePublishes: true,
-  notifyOtherPublishes: true,
+  notifyLessonStarted: true,
   notifyLessonFinished: true,
-  notifyAutoAnswerScheduled: true,
-  notifyAutoAnswerStarted: true,
-  notifyAutoAnswerSucceeded: true,
-  notifyAutoAnswerFailed: true,
+  notifyAiAnalysisStarted: true,
+  notifyAiAnalysisFinished: true,
+  notifyAnswerSucceeded: true,
+  notifyAnswerFailed: true,
   notifyNative: true,
   notifyPopup: true,
   notifySound: true,

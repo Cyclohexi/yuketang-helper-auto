@@ -5,6 +5,32 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createBackendRuntime } from './runtime.js';
 
 describe('classroom publish lifecycle', () => {
+  it('announces lesson start once across repeated connections', async () => {
+    const fixture = await createFixture();
+    await fixture.runtime.facade.connectLesson(
+      BrowserEnvironment.Standard,
+      '7',
+    );
+    expect(
+      fixture.notices.filter((notice) => notice.kind === 'lesson-started'),
+    ).toHaveLength(1);
+  });
+
+  it('does not submit a loaded locked question through the agent', async () => {
+    const fixture = await createFixture();
+    await fixture.loadPresentation();
+    expect((await fixture.runtime.facade.listProblems('7'))[0]?.status).toBe(
+      'locked',
+    );
+    await expect(
+      fixture.runtime.activeLessons!.submitAnswer({
+        problemId: '11',
+        answer: ['A'],
+        confirmedBy: 'agent',
+      }),
+    ).rejects.toThrow('题目尚未发布');
+  });
+
   it('discards pending publishes when the lesson ends before the presentation loads', async () => {
     const fixture = await createFixture();
     await fixture.publish('11');
@@ -65,6 +91,7 @@ describe('classroom publish lifecycle', () => {
     await fixture.loadPresentation();
 
     expect(fixture.notices.map((notice) => notice.kind)).toEqual([
+      'lesson-started',
       'assessment-publish',
       'assessment-publish',
       'problem-start',

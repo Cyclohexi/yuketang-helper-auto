@@ -238,7 +238,7 @@ describe('M6 facade support', () => {
     await runtime.stop();
   });
 
-  it('stores profile credentials outside ordinary settings and generates a proposal', async () => {
+  it('keeps credentials separate and generates a proposal before the question is published', async () => {
     const lessons = new InMemoryLessonRepository();
     const session = lessons.upsertLesson({
       id: 'lesson-ai',
@@ -271,14 +271,6 @@ describe('M6 facade support', () => {
         },
       ],
     });
-    session.unlockProblem(
-      'problem-ai',
-      'presentation-ai',
-      'slide-ai',
-      1000,
-      61_000,
-      1000,
-    );
     const dataStore = new MemoryAppDataStore();
     const secretStore = new MemorySecretStore();
     const fetcher = vi.fn(async (input: string | URL | Request) =>
@@ -321,6 +313,10 @@ describe('M6 facade support', () => {
     });
     const exported = await dataStore.exportData();
 
+    expect((await runtime.facade.listProblems('lesson-ai'))[0]?.status).toBe(
+      'locked',
+    );
+    expect(proposal.status).toBe('ready');
     expect(proposal.answer).toEqual(['B']);
     expect(proposal.explanation).toBe('基础功能测试');
     expect(proposal.sessionId).not.toBe('');

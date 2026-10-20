@@ -7,6 +7,7 @@ import {
   DefaultAppSettings,
   ProblemType,
   type AnswerProposal,
+  type AppSettings,
   type ProblemContext,
 } from '@ykt/contracts';
 import AssistantPanel from '../../apps/desktop/renderer/src/components/AssistantPanel.vue';
@@ -27,6 +28,318 @@ afterEach(() => {
 });
 
 describe('LLM automation settings', () => {
+  it('preanalyzes loaded locked questions and submits the cached answer only after publication', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+    });
+    problem.status = 'locked';
+    await panel.loadLessonData();
+    await panel.preanalyzeLoadedProblems();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+    problem.status = 'available';
+    await panel.automationTick();
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).toHaveBeenCalledOnce();
+  });
+
+  it('waits for an in-progress preanalysis after publication instead of generating again', async () => {
+    const { panel, api, problem, proposal } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+    });
+    let resolve!: (value: AnswerProposal) => void;
+    api.generateAnswerProposal.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    problem.status = 'locked';
+    const analysis = panel.preanalyzeLoadedProblems();
+    await vi.advanceTimersByTimeAsync(0);
+    problem.status = 'available';
+    await panel.onAvailableProblem(problem);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+    resolve(proposal);
+    await analysis;
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).toHaveBeenCalledOnce();
+  });
+
+  it.each(['disable', 'finish', 'switch'] as const)(
+    'cancels pending submission on %s while AI is responding',
+    async (action) => {
+      const { panel, api, problem, proposal } = setupPanel({
+        llmAutoGenerate: true,
+        llmManagedSubmit: true,
+      });
+      let resolve!: (value: AnswerProposal) => void;
+      api.generateAnswerProposal.mockImplementationOnce(
+        () =>
+          new Promise((done) => {
+            resolve = done;
+          }),
+      );
+      await panel.onAvailableProblem(problem);
+      await vi.advanceTimersByTimeAsync(1000);
+      if (action === 'disable')
+        panel.applySettings({
+          ...DefaultAppSettings,
+          llmAutoGenerate: true,
+          llmManagedSubmit: false,
+        });
+      else if (action === 'finish') panel.leaveFinishedLesson(problem.lessonId);
+      else panel.setLesson('lesson-2');
+      resolve(proposal);
+      await vi.runAllTimersAsync();
+      expect(api.submitAnswer).not.toHaveBeenCalled();
+    },
+  );
+
+  it('uses each question slide without moving the current selection', async () => {
+    const { panel, api, problem } = setupPanel({ llmAutoGenerate: true });
+    const second = {
+      ...problem,
+      id: 'problem-2',
+      slideId: 'slide-2',
+      status: 'locked',
+    };
+    panel.problems.value = [{ ...problem, status: 'locked' }, second];
+    panel.presentations.value = [
+      {
+        id: problem.presentationId,
+        lessonId: problem.lessonId,
+        title: '课件',
+        width: 100,
+        height: 100,
+        slides: [problem, second].map((item, index) => ({
+          id: item.slideId,
+          index,
+          title: '题目',
+          imageUrl: `https://example.test/${item.id}.png`,
+          problem: item,
+        })),
+      },
+    ];
+    await panel.preanalyzeLoadedProblems();
+    expect(api.generateAnswerProposal).toHaveBeenCalledTimes(2);
+    for (const item of [problem, second]) {
+      expect(api.generateAnswerProposal).toHaveBeenCalledWith(
+        expect.objectContaining({
+          problemId: item.id,
+          imageUrls: [`https://example.test/${item.id}.png`],
+          captureCurrentPage: false,
+        }),
+      );
+    }
+    expect(panel.selectedProblemId.value).toBe(problem.id);
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+  });
+
+  it('discards an old pending answer when the selected model changes', async () => {
+    const { panel, api, problem, proposal } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+    });
+    let resolve!: (value: AnswerProposal) => void;
+    api.generateAnswerProposal.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await panel.automationTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    panel.applySettings({
+      ...DefaultAppSettings,
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      notifyProblems: false,
+      autoAnswerDelay: 1000,
+      autoAnswerRandomDelay: 0,
+      activeAiProfileId: 'new-model',
+      aiProfiles: [
+        {
+          id: 'new-model',
+          name: 'Test',
+          providerId: 'fixture',
+          baseUrl: 'https://example.test',
+          model: 'model-2',
+          visionModel: '',
+          ocrModel: '',
+          translationModel: '',
+          temperature: null,
+          models: [],
+          discoveredAt: '',
+        },
+      ],
+    });
+    api.generateAnswerProposal.mockResolvedValueOnce({
+      ...proposal,
+      id: 'proposal-new-model',
+    });
+    resolve(proposal);
+    await vi.runAllTimersAsync();
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledTimes(2);
+    expect(api.submitAnswer).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        problemId: problem.id,
+        proposalId: 'proposal-new-model',
+      }),
+    );
+  });
+
+  it('reports failure without submitting if preanalysis finishes after the deadline', async () => {
+    const { panel, api, problem, proposal } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      notifyProblems: true,
+      notifyNative: true,
+      notifyPopup: false,
+      notifySound: false,
+    });
+    let resolve!: (value: AnswerProposal) => void;
+    api.generateAnswerProposal.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    problem.deadlineAt = Date.now() + 2000;
+    await panel.onAvailableProblem(problem);
+    await vi.advanceTimersByTimeAsync(2500);
+    resolve(proposal);
+    await vi.runAllTimersAsync();
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+    expect(api.showNotification).toHaveBeenCalledWith(
+      '作答失败',
+      expect.stringContaining('已截止'),
+    );
+  });
+
+  it('reports batch counts and actual submission rejection through the new notices', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      notifyProblems: true,
+      notifyNative: true,
+      notifyPopup: false,
+      notifySound: false,
+    });
+    problem.status = 'locked';
+    panel.problems.value = [problem, { ...problem, id: 'problem-2' }];
+    api.generateAnswerProposal.mockRejectedValueOnce(
+      new Error('analysis failed'),
+    );
+    await panel.preanalyzeLoadedProblems();
+    expect(api.showNotification.mock.calls).toEqual([
+      ['AI 分析题目中，共 2 道题', expect.any(String)],
+      ['AI 分析了 2 道题', '成功 1 道，失败 1 道。'],
+    ]);
+    problem.status = 'available';
+    await panel.onAvailableProblem(problem);
+    await vi.runAllTimersAsync();
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+    expect(api.showNotification).toHaveBeenLastCalledWith(
+      '作答失败',
+      expect.stringContaining('预分析'),
+    );
+
+    api.showNotification.mockClear();
+    const second = panel.problems.value[1];
+    second.status = 'available';
+    api.submitAnswer.mockResolvedValueOnce({
+      problemId: second.id,
+      status: 'rejected',
+      route: 'answer',
+      submittedAt: new Date().toISOString(),
+    });
+    await panel.onAvailableProblem(second);
+    await vi.runAllTimersAsync();
+    expect(api.showNotification).toHaveBeenLastCalledWith(
+      '作答失败',
+      '平台未接受本次作答。',
+    );
+    expect(
+      api.showNotification.mock.calls.some(([title]) => title === '作答成功'),
+    ).toBe(false);
+  });
+
+  it('reports success even when the notification transport fails', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      notifyProblems: true,
+      notifyNative: true,
+      notifyPopup: false,
+      notifySound: false,
+    });
+    api.showNotification.mockRejectedValue(
+      new Error('notification unavailable'),
+    );
+    await panel.onAvailableProblem(problem);
+    await vi.runAllTimersAsync();
+    expect(api.submitAnswer).toHaveBeenCalledOnce();
+    expect(api.showNotification).toHaveBeenCalledWith(
+      '作答成功',
+      expect.any(String),
+    );
+    expect(
+      api.showNotification.mock.calls.some(([title]) => title === '作答失败'),
+    ).toBe(false);
+  });
+
+  it.each([
+    'notifyAiAnalysisStarted',
+    'notifyAiAnalysisFinished',
+    'notifyAnswerSucceeded',
+    'notifyAnswerFailed',
+    'notifyProblems',
+  ] as const)(
+    'respects the %s reminder switch without disabling analysis or submission',
+    async (key) => {
+      const { panel, api, problem } = setupPanel({
+        llmAutoGenerate: true,
+        llmManagedSubmit: true,
+        notifyProblems: true,
+        notifyNative: true,
+        notifyPopup: false,
+        notifySound: false,
+        [key]: false,
+      });
+      if (key === 'notifyAnswerFailed')
+        api.submitAnswer.mockRejectedValueOnce(
+          new Error('submission rejected'),
+        );
+      await panel.onAvailableProblem(problem);
+      await vi.runAllTimersAsync();
+      const titles = api.showNotification.mock.calls.map(([title]) => title);
+      expect(api.submitAnswer).toHaveBeenCalledOnce();
+      if (key === 'notifyProblems') expect(titles).toEqual([]);
+      else {
+        const excluded = {
+          notifyAiAnalysisStarted: 'AI 分析题目中，共 1 道题',
+          notifyAiAnalysisFinished: 'AI 分析了 1 道题',
+          notifyAnswerSucceeded: '作答成功',
+          notifyAnswerFailed: '作答失败',
+        }[key];
+        expect(titles).not.toContain(excluded);
+        expect(titles).toHaveLength(2);
+      }
+    },
+  );
+
   it('runs the complete generation and managed submission flow', async () => {
     const { panel, api, problem } = setupPanel({
       llmAutoGenerate: true,
@@ -68,7 +381,7 @@ describe('LLM automation settings', () => {
     expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
     expect(api.validateAnswer).not.toHaveBeenCalled();
     expect(api.submitAnswer).not.toHaveBeenCalled();
-    expect(panel.infoMessage.value).toContain('等待手动核对');
+    expect(panel.infoMessage.value).toContain('已预分析题目');
   });
 
   it('selects and analyzes the latest available problem on AI page open', async () => {
@@ -167,7 +480,7 @@ describe('LLM automation settings', () => {
   });
 });
 
-function setupPanel(settings: Record<string, boolean>) {
+function setupPanel(settings: Partial<AppSettings>) {
   vi.useFakeTimers();
   const problem: ProblemContext = {
     id: 'problem-1',
@@ -219,6 +532,7 @@ function setupPanel(settings: Record<string, boolean>) {
     })),
     listProblems: vi.fn(async () => [problem]),
     listPresentations: vi.fn(async () => []),
+    showNotification: vi.fn(async () => true),
   };
   vi.stubGlobal('window', { yuketang: api });
   const scope = effectScope();
@@ -236,14 +550,15 @@ function setupPanel(settings: Record<string, boolean>) {
   );
   panel.applySettings({
     ...DefaultAppSettings,
-    ...settings,
     autoAnswerDelay: 1000,
     autoAnswerRandomDelay: 0,
     notifyProblems: false,
+    ...settings,
   });
   panel.problems.value = [problem];
   panel.selectedLessonId.value = problem.lessonId;
-  return { panel, api, problem, emit, props };
+  panel.selectedProblemId.value = problem.id;
+  return { panel, api, problem, proposal, emit, props };
 }
 
 it('prefills assignment extraction in AI without auto-send or leaking classroom/image context', async () => {

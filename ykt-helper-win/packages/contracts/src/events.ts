@@ -45,12 +45,12 @@ export type ClassroomNoticeKind =
   | 'problem-start'
   | 'assessment-publish'
   | 'courseware-publish'
-  | 'other-publish'
+  | 'lesson-started'
   | 'lesson-finished'
-  | 'auto-answer-scheduled'
-  | 'auto-answer-started'
-  | 'auto-answer-succeeded'
-  | 'auto-answer-failed';
+  | 'ai-analysis-started'
+  | 'ai-analysis-finished'
+  | 'answer-succeeded'
+  | 'answer-failed';
 
 export interface ClassroomNotice {
   readonly kind: ClassroomNoticeKind;

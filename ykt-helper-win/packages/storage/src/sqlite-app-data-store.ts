@@ -261,6 +261,16 @@ function migrateLegacySettings(
   if (stored.aiAnalyzeLatestOnOpen === undefined) {
     migrated.aiAnalyzeLatestOnOpen = stored.aiAutoAnalyze === true;
   }
+  const noticeKeys = {
+    notifyAiAnalysisStarted: 'notifyAutoAnswerStarted',
+    notifyAiAnalysisFinished: 'notifyAutoAnswerSucceeded',
+    notifyAnswerSucceeded: 'notifyAutoAnswerSucceeded',
+    notifyAnswerFailed: 'notifyAutoAnswerFailed',
+  } as const;
+  for (const [current, legacy] of Object.entries(noticeKeys)) {
+    if (stored[current] === undefined && typeof stored[legacy] === 'boolean')
+      migrated[current] = stored[legacy];
+  }
   return migrated;
 }
 

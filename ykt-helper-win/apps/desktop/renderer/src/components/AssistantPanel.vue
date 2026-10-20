@@ -34,6 +34,10 @@ import ClassroomSimulator from './ClassroomSimulator.vue';
 import ProblemPicker from './ProblemPicker.vue';
 import { enterActiveLessons } from '../auto-join';
 import { renderSimpleMarkdown } from '../simple-markdown';
+import {
+  ClassroomPreanalysis,
+  type PreanalysisBatch,
+} from '../classroom-preanalysis';
 
 type WorkspacePage =
   | 'assignments'
@@ -52,12 +56,12 @@ interface SettingsDraft {
   notifyProblemStarts: boolean;
   notifyAssessmentPublishes: boolean;
   notifyCoursewarePublishes: boolean;
-  notifyOtherPublishes: boolean;
+  notifyLessonStarted: boolean;
   notifyLessonFinished: boolean;
-  notifyAutoAnswerScheduled: boolean;
-  notifyAutoAnswerStarted: boolean;
-  notifyAutoAnswerSucceeded: boolean;
-  notifyAutoAnswerFailed: boolean;
+  notifyAiAnalysisStarted: boolean;
+  notifyAiAnalysisFinished: boolean;
+  notifyAnswerSucceeded: boolean;
+  notifyAnswerFailed: boolean;
   notifyNative: boolean;
   notifyPopup: boolean;
   notifySound: boolean;
@@ -239,6 +243,27 @@ let lastAutoJoinAt = 0;
 let nextNoticeToastId = 1;
 let nextAiChatMessageId = 1;
 const seenNotices = new Map<string, number>();
+let automationEpoch = 0;
+let analysisEpoch = 0;
+let preanalysisContext = '';
+const preanalysis = new ClassroomPreanalysis({
+  analyze: ({ problem, imageUrls }, isCurrent) =>
+    requestAiProposal(
+      problem,
+      problemAiContextId(problem),
+      '分析这道题并给出答案建议。',
+      true,
+      false,
+      imageUrls,
+      isCurrent,
+    ),
+  started: (batch) => emitAnalysisNotice('ai-analysis-started', batch),
+  finished: (batch) => emitAnalysisNotice('ai-analysis-finished', batch),
+});
+
+function problemAiContextId(problem: ProblemContext): string {
+  return `${props.environment}:${problem.lessonId}:${problem.id}`;
+}
 
 const selectedLesson = computed(() =>
   lessons.value.find((lesson) => lesson.id === selectedLessonId.value),
@@ -298,7 +323,7 @@ const selectedAiImageSlides = computed(() => {
 const currentAiContextId = computed(
   () =>
     assignmentAiContext.value?.id ||
-    selectedProblemId.value ||
+    (selectedProblem.value ? problemAiContextId(selectedProblem.value) : '') ||
     aiSlideContextId.value,
 );
 
@@ -445,6 +470,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  resetAutomation();
   subscriptions.forEach((unsubscribe) => unsubscribe());
   if (automationTimer) clearInterval(automationTimer);
   for (const timer of scheduledProblems.values()) clearTimeout(timer);
@@ -454,6 +480,7 @@ onUnmounted(() => {
 watch(
   () => props.environment,
   async () => {
+    resetAutomation();
     assignmentAiContext.value = null;
     selectedLessonId.value = '';
     collectingLessonId.value = '';
@@ -631,12 +658,17 @@ async function connectLesson(): Promise<void> {
 
 async function loadLessonData(): Promise<void> {
   if (!selectedLessonId.value) return;
+  const lessonId = selectedLessonId.value;
+  const environment = props.environment;
   const [nextProblems, nextPresentations] = await Promise.all([
-    window.yuketang.listProblems(selectedLessonId.value),
-    window.yuketang.listPresentations(selectedLessonId.value),
+    window.yuketang.listProblems(lessonId),
+    window.yuketang.listPresentations(lessonId),
   ]);
+  if (selectedLessonId.value !== lessonId || props.environment !== environment)
+    return;
   problems.value = nextProblems;
   presentations.value = nextPresentations;
+  void preanalyzeLoadedProblems();
   if (!nextProblems.some((problem) => problem.id === selectedProblemId.value)) {
     selectedProblemId.value =
       nextProblems.find((problem) => problem.status === 'available')?.id ??
@@ -660,6 +692,7 @@ async function loadLessonData(): Promise<void> {
 }
 
 function setLesson(id: string): void {
+  if (selectedLessonId.value !== id) resetAutomation();
   selectedLessonId.value = id;
   selectedPresentationId.value = '';
   selectedSlideId.value = '';
@@ -861,7 +894,8 @@ async function analyzeProblem(auto: boolean): Promise<void> {
   if (auto && assignmentAiContext.value) return;
   const problem = assignmentAiContext.value ? undefined : selectedProblem.value;
   const contextId =
-    assignmentAiContext.value?.id ?? problem?.id ?? aiSlideContextId.value;
+    assignmentAiContext.value?.id ??
+    (problem ? problemAiContextId(problem) : aiSlideContextId.value);
   if (!contextId) return;
   const customPrompt = auto ? '' : aiCustomPrompt.value.trim();
   if (!problem && !customPrompt) {
@@ -885,7 +919,11 @@ async function analyzeLatestProblemOnOpen(): Promise<void> {
   selectedProblemId.value = latest.id;
   aiSlideSelection.value = [];
   await nextTick();
-  if (!aiChatSessions.has(latest.id)) await analyzeProblem(Boolean(settings.value?.llmAutoGenerate));
+  if (settings.value?.llmAutoGenerate) {
+    void preanalyzeLoadedProblems();
+    await preanalysis.result(latest.id);
+  } else if (!aiChatSessions.has(problemAiContextId(latest)))
+    await analyzeProblem(false);
 }
 
 async function sendAiFollowUp(): Promise<void> {
@@ -901,11 +939,18 @@ async function retryAiRequest(): Promise<void> {
   const problem = assignmentAiContext.value ? undefined : selectedProblem.value;
   const session = currentAiSession.value;
   if (!session) return;
+  if (session.lastAuto && problem && settings.value?.llmAutoGenerate) {
+    preanalysis.invalidate(problem.id);
+    seenAvailableProblems.delete(problem.id);
+    void preanalyzeLoadedProblems();
+    await preanalysis.result(problem.id);
+    return;
+  }
   await requestAiProposal(
     problem,
     session.contextId,
     session.lastPrompt,
-    session.lastAuto,
+    false,
     true,
   );
 }
@@ -926,15 +971,22 @@ async function requestAiProposal(
   prompt: string,
   auto: boolean,
   retry: boolean,
-): Promise<void> {
-  clearMessages();
+  automaticImages?: readonly string[],
+  automaticIsCurrent: () => boolean = () => true,
+): Promise<AnswerProposal | undefined> {
+  if (!auto) clearMessages();
+  const epoch = analysisEpoch;
+  const contextImages = auto
+    ? [...(automaticImages ?? (problem ? problemImageUrls(problem) : []))]
+    : [...selectedAiImages.value];
+  if (auto) aiChatSessions.delete(contextId);
   let session = aiChatSessions.get(contextId);
   if (!session) {
     aiChatSessions.set(contextId, {
       id: crypto.randomUUID(),
       contextId,
       ...(problem ? { problemId: problem.id } : {}),
-      imageUrls: [...selectedAiImages.value],
+      imageUrls: contextImages,
       captureCurrentPage: captureCurrentBrowserPage.value,
       messages: [],
       requestVersion: 0,
@@ -969,22 +1021,13 @@ async function requestAiProposal(
     status: 'pending',
   });
   const pendingMessage = session.messages[session.messages.length - 1]!;
-  aiProposal.value = undefined;
-
-  if (auto && problem) {
-    void emitLocalNotice(
-      'auto-answer-started',
-      problem,
-      'Agent 开始作答',
-      problem.prompt || '正在分析新题',
-    );
-  }
+  if (currentAiContextId.value === contextId) aiProposal.value = undefined;
   let proposal: AnswerProposal;
   try {
     const includeInitialContext =
       Boolean(problem) || retry || session.messages.length === 2;
     const imageUrls = problem
-      ? [...selectedAiImages.value]
+      ? contextImages
       : includeInitialContext
         ? [...session.imageUrls]
         : [];
@@ -1001,21 +1044,23 @@ async function requestAiProposal(
       retry,
     });
   } catch (error) {
-    if (session.requestVersion !== requestVersion) return;
+    if (
+      session.requestVersion !== requestVersion ||
+      aiChatSessions.get(contextId) !== session ||
+      (auto && (epoch !== analysisEpoch || !automaticIsCurrent()))
+    )
+      return;
     pendingMessage.status = 'failed';
     pendingMessage.content = errorText(error);
-    if (auto && problem) {
-      await emitLocalNotice(
-        'auto-answer-failed',
-        problem,
-        'Agent 未提交答案',
-        pendingMessage.content,
-      );
-    }
     return;
   }
 
-  if (session.requestVersion !== requestVersion) return;
+  if (
+    session.requestVersion !== requestVersion ||
+    aiChatSessions.get(contextId) !== session ||
+    (auto && (epoch !== analysisEpoch || !automaticIsCurrent()))
+  )
+    return;
   pendingMessage.proposal = proposal;
   pendingMessage.status = proposal.status;
   pendingMessage.content = proposalResponseText(proposal);
@@ -1026,26 +1071,16 @@ async function requestAiProposal(
       proposal.status === 'ready'
         ? 'AI 已回复，可继续追问或采用建议。'
         : proposal.failureReason || '没有生成可用的 AI 建议。';
-    return;
+    return proposal;
   }
 
-  if (!problem) return;
-  if (agentAutoSubmitEnabled.value) {
-    await applyAutomaticProposal(problem, proposal);
-    return;
+  if (currentAiContextId.value === contextId) {
+    infoMessage.value =
+      proposal.status === 'ready'
+        ? 'AI 已预分析题目，等待发布后按设置作答；也可手动核对。'
+        : proposal.failureReason || 'AI 预分析失败。';
   }
-  infoMessage.value =
-    proposal.status === 'ready'
-      ? 'LLM 已生成答案，等待手动核对。'
-      : proposal.failureReason || 'LLM 未生成可用答案。';
-  await emitLocalNotice(
-    proposal.status === 'ready'
-      ? 'auto-answer-succeeded'
-      : 'auto-answer-failed',
-    problem,
-    proposal.status === 'ready' ? 'LLM 已生成答案' : 'LLM 生成答案失败',
-    infoMessage.value,
-  );
+  return proposal;
 }
 
 async function applyAutomaticProposal(
@@ -1055,9 +1090,9 @@ async function applyAutomaticProposal(
   if (proposal.status !== 'ready' || !proposal.answer) {
     infoMessage.value = proposal.failureReason || '没有生成可提交的 AI 答案。';
     await emitLocalNotice(
-      'auto-answer-failed',
+      'answer-failed',
       problem,
-      'Agent 未提交答案',
+      '作答失败',
       infoMessage.value,
     );
     return;
@@ -1072,36 +1107,39 @@ async function applyAutomaticProposal(
     infoMessage.value = 'LLM 已生成答案，托管提交已关闭。';
     return;
   }
+  if (
+    problem.status !== 'available' ||
+    (problem.deadlineAt !== null && problem.deadlineAt <= Date.now())
+  )
+    return;
 
+  let submittedAt: string;
   try {
     const result = await window.yuketang.submitAnswer({
-    problemId: problem.id,
-    answer: proposal.answer,
-    proposalId: proposal.id,
-    confirmedBy: 'agent',
-  });
-  if (selectedProblemId.value === problem.id) appliedProposalId.value = '';
-  submissionMessage.value = `Agent 已于 ${formatTime(result.submittedAt)} 自动提交`;
-  infoMessage.value = 'Agent 已自动确认并提交答案';
-  await loadLessonData();
-  await emitLocalNotice(
-    'auto-answer-succeeded',
-    problem,
-    'Agent 已提交答案',
-    `${problemTypeLabel(problem.type)}已由模型完成并提交。`,
-    );
+      problemId: problem.id,
+      answer: proposal.answer,
+      proposalId: proposal.id,
+      confirmedBy: 'agent',
+    });
+    if (result.status !== 'submitted') throw new Error('平台未接受本次作答。');
+    submittedAt = result.submittedAt;
   } catch (caught) {
-    const message =
-      caught instanceof Error ? caught.message : String(caught);
+    const message = caught instanceof Error ? caught.message : String(caught);
     errorMessage.value = message;
     infoMessage.value = `自动提交失败：${message}`;
-    await emitLocalNotice(
-      'auto-answer-failed',
-      problem,
-      '自动提交失败',
-      message,
-    );
+    await emitLocalNotice('answer-failed', problem, '作答失败', message);
+    return;
   }
+  if (selectedProblemId.value === problem.id) appliedProposalId.value = '';
+  submissionMessage.value = `已于 ${formatTime(submittedAt)} 自动作答`;
+  infoMessage.value = '作答成功';
+  await emitLocalNotice(
+    'answer-succeeded',
+    problem,
+    '作答成功',
+    `${problemTypeLabel(problem.type)}答案已提交至平台。`,
+  );
+  await loadLessonData().catch(() => {});
 }
 
 function proposalResponseText(proposal: AnswerProposal): string {
@@ -1174,12 +1212,12 @@ async function saveSettings(): Promise<void> {
       notifyProblemStarts: draft.notifyProblemStarts,
       notifyAssessmentPublishes: draft.notifyAssessmentPublishes,
       notifyCoursewarePublishes: draft.notifyCoursewarePublishes,
-      notifyOtherPublishes: draft.notifyOtherPublishes,
+      notifyLessonStarted: draft.notifyLessonStarted,
       notifyLessonFinished: draft.notifyLessonFinished,
-      notifyAutoAnswerScheduled: draft.notifyAutoAnswerScheduled,
-      notifyAutoAnswerStarted: draft.notifyAutoAnswerStarted,
-      notifyAutoAnswerSucceeded: draft.notifyAutoAnswerSucceeded,
-      notifyAutoAnswerFailed: draft.notifyAutoAnswerFailed,
+      notifyAiAnalysisStarted: draft.notifyAiAnalysisStarted,
+      notifyAiAnalysisFinished: draft.notifyAiAnalysisFinished,
+      notifyAnswerSucceeded: draft.notifyAnswerSucceeded,
+      notifyAnswerFailed: draft.notifyAnswerFailed,
       notifyNative: draft.notifyNative,
       notifyPopup: draft.notifyPopup,
       notifySound: draft.notifySound,
@@ -1208,30 +1246,34 @@ async function saveSettings(): Promise<void> {
     infoMessage.value = '设置已保存';
   });
   if (!settings.value?.llmAutoGenerate) {
-    for (const timer of scheduledProblems.values()) clearTimeout(timer);
-    scheduledProblems.clear();
-  } else if (!wasAutoGenerateEnabled) {
-    for (const problem of problems.value) {
-      if (problem.status === 'available')
-        seenAvailableProblems.delete(problem.id);
+    resetAutomation();
+  } else {
+    if (!settings.value.llmManagedSubmit) cancelSubmissionTimers();
+    if (!wasAutoGenerateEnabled) {
+      for (const problem of problems.value) {
+        if (problem.status === 'available')
+          seenAvailableProblems.delete(problem.id);
+      }
     }
+    void preanalyzeLoadedProblems();
     void automationTick();
   }
 }
 
 function applySettings(value: AppSettings): void {
+  const previous = settings.value;
   settings.value = value;
   settingsDraft.value = {
     notifyProblems: value.notifyProblems,
     notifyProblemStarts: value.notifyProblemStarts,
     notifyAssessmentPublishes: value.notifyAssessmentPublishes,
     notifyCoursewarePublishes: value.notifyCoursewarePublishes,
-    notifyOtherPublishes: value.notifyOtherPublishes,
+    notifyLessonStarted: value.notifyLessonStarted,
     notifyLessonFinished: value.notifyLessonFinished,
-    notifyAutoAnswerScheduled: value.notifyAutoAnswerScheduled,
-    notifyAutoAnswerStarted: value.notifyAutoAnswerStarted,
-    notifyAutoAnswerSucceeded: value.notifyAutoAnswerSucceeded,
-    notifyAutoAnswerFailed: value.notifyAutoAnswerFailed,
+    notifyAiAnalysisStarted: value.notifyAiAnalysisStarted,
+    notifyAiAnalysisFinished: value.notifyAiAnalysisFinished,
+    notifyAnswerSucceeded: value.notifyAnswerSucceeded,
+    notifyAnswerFailed: value.notifyAnswerFailed,
     notifyNative: value.notifyNative,
     notifyPopup: value.notifyPopup,
     notifySound: value.notifySound,
@@ -1256,6 +1298,12 @@ function applySettings(value: AppSettings): void {
     cacheMaxMb: Math.round(value.cacheMaxBytes / 1024 / 1024),
     logRetentionDays: value.logRetentionDays,
   };
+  if (!value.llmAutoGenerate) resetAutomation();
+  else {
+    if (previous?.llmManagedSubmit && !value.llmManagedSubmit)
+      cancelSubmissionTimers();
+    void preanalyzeLoadedProblems();
+  }
 }
 
 async function resetSettings(): Promise<void> {
@@ -1415,6 +1463,13 @@ async function testNotification(): Promise<void> {
 async function handleClassroomNotice(notice: ClassroomNotice): Promise<void> {
   if (notice.kind === 'lesson-finished') {
     leaveFinishedLesson(notice.lessonId);
+  } else if (
+    notice.lessonId === selectedLessonId.value &&
+    ['problem-start', 'courseware-publish', 'assessment-publish'].includes(
+      notice.kind,
+    )
+  ) {
+    void automationTick();
   }
   const currentSettings = settings.value;
   if (!currentSettings?.notifyProblems || !noticeEnabled(notice.kind)) return;
@@ -1436,6 +1491,7 @@ function leaveFinishedLesson(lessonId: string): void {
   }
   lessons.value = lessons.value.filter((lesson) => lesson.id !== lessonId);
   if (selectedLessonId.value !== lessonId) return;
+  resetAutomation();
   selectedLessonId.value = lessons.value[0]?.id ?? '';
   selectedProblemId.value = '';
   selectedPresentationId.value = '';
@@ -1471,7 +1527,9 @@ async function deliverNotice(notice: ClassroomNotice): Promise<void> {
   if (!currentSettings) return;
   if (currentSettings.notifySound) playNotifySound();
   if (currentSettings.notifyNative) {
-    await window.yuketang.showNotification(notice.title, notice.detail);
+    await window.yuketang
+      .showNotification(notice.title, notice.detail)
+      .catch(() => {});
   }
   if (currentSettings.notifyPopup) {
     const toast: NoticeToast = { ...notice, id: nextNoticeToastId++ };
@@ -1494,12 +1552,12 @@ function noticeEnabled(kind: ClassroomNoticeKind): boolean {
     'problem-start': currentSettings.notifyProblemStarts,
     'assessment-publish': currentSettings.notifyAssessmentPublishes,
     'courseware-publish': currentSettings.notifyCoursewarePublishes,
-    'other-publish': currentSettings.notifyOtherPublishes,
+    'lesson-started': currentSettings.notifyLessonStarted,
     'lesson-finished': currentSettings.notifyLessonFinished,
-    'auto-answer-scheduled': currentSettings.notifyAutoAnswerScheduled,
-    'auto-answer-started': currentSettings.notifyAutoAnswerStarted,
-    'auto-answer-succeeded': currentSettings.notifyAutoAnswerSucceeded,
-    'auto-answer-failed': currentSettings.notifyAutoAnswerFailed,
+    'ai-analysis-started': currentSettings.notifyAiAnalysisStarted,
+    'ai-analysis-finished': currentSettings.notifyAiAnalysisFinished,
+    'answer-succeeded': currentSettings.notifyAnswerSucceeded,
+    'answer-failed': currentSettings.notifyAnswerFailed,
   }[kind];
 }
 
@@ -1576,18 +1634,15 @@ async function automationTick(): Promise<void> {
         selectedLessonId.value = enteredLessonIds[0];
       }
     }
-    if (
-      !selectedLessonId.value ||
-      !connectedLessonIds.has(selectedLessonId.value)
-    )
-      return;
+    if (!selectedLessonId.value) return;
     await loadLessonData();
     const nextProblems = problems.value;
     for (const problem of nextProblems) {
       if (
         problem.status !== 'available' ||
         seenAvailableProblems.has(problem.id) ||
-        !currentSettings.llmAutoGenerate
+        !currentSettings.llmAutoGenerate ||
+        !currentSettings.llmManagedSubmit
       )
         continue;
       seenAvailableProblems.add(problem.id);
@@ -1603,7 +1658,13 @@ async function automationTick(): Promise<void> {
 async function onAvailableProblem(problem: ProblemContext): Promise<void> {
   const currentSettings = settings.value;
   if (!currentSettings) return;
-  if (!currentSettings.llmAutoGenerate || scheduledProblems.has(problem.id))
+  if (!currentSettings.llmAutoGenerate) return;
+  void preanalyzeLoadedProblems();
+  if (
+    !currentSettings.llmManagedSubmit ||
+    problem.status !== 'available' ||
+    scheduledProblems.has(problem.id)
+  )
     return;
   const delay =
     currentSettings.autoAnswerDelay +
@@ -1611,27 +1672,167 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
   const remaining = problem.deadlineAt
     ? problem.deadlineAt - Date.now()
     : Infinity;
-  if (remaining <= delay) return;
-  await emitLocalNotice(
-    'auto-answer-scheduled',
-    problem,
-    'LLM 答案生成已排队',
-    `${Math.ceil(delay / 1000)} 秒后开始分析。`,
+  const epoch = automationEpoch;
+  const environment = props.environment;
+  const timer = setTimeout(
+    async () => {
+      try {
+        const current = problems.value.find((item) => item.id === problem.id);
+        if (
+          epoch !== automationEpoch ||
+          environment !== props.environment ||
+          !agentAutoSubmitEnabled.value ||
+          !current ||
+          current.lessonId !== selectedLessonId.value ||
+          current.status === 'answered'
+        )
+          return;
+        if (
+          current.status !== 'available' ||
+          (current.deadlineAt !== null && current.deadlineAt <= Date.now())
+        ) {
+          await emitLocalNotice(
+            'answer-failed',
+            current,
+            '作答失败',
+            '题目已截止，未提交答案。',
+          );
+          return;
+        }
+        const analysisResult = preanalysis.result(current.id);
+        const proposal = await analysisResult;
+        const latest = problems.value.find((item) => item.id === problem.id);
+        if (
+          epoch !== automationEpoch ||
+          !agentAutoSubmitEnabled.value ||
+          !latest ||
+          latest.lessonId !== selectedLessonId.value ||
+          latest.status === 'answered'
+        )
+          return;
+        if (preanalysis.result(latest.id) !== analysisResult) {
+          seenAvailableProblems.delete(latest.id);
+          return;
+        }
+        if (
+          latest.status !== 'available' ||
+          (latest.deadlineAt !== null && latest.deadlineAt <= Date.now())
+        ) {
+          await emitLocalNotice(
+            'answer-failed',
+            latest,
+            '作答失败',
+            '题目已截止，未提交答案。',
+          );
+          return;
+        }
+        if (!proposal) {
+          await emitLocalNotice(
+            'answer-failed',
+            latest,
+            '作答失败',
+            'AI 未能预分析出可用答案，可在 AI 页重新分析。',
+          );
+          return;
+        }
+        if (!preanalysis.isCurrent(latest.id, proposal)) {
+          seenAvailableProblems.delete(latest.id);
+          return;
+        }
+        await applyAutomaticProposal(latest, proposal);
+      } catch (error) {
+        if (epoch === automationEpoch)
+          await emitLocalNotice(
+            'answer-failed',
+            problem,
+            '作答失败',
+            errorText(error),
+          );
+      } finally {
+        if (scheduledProblems.get(problem.id) === timer)
+          scheduledProblems.delete(problem.id);
+      }
+    },
+    Math.max(0, Math.min(delay, remaining - 250)),
   );
-  const timer = setTimeout(() => {
-    scheduledProblems.delete(problem.id);
-    const current = problems.value.find((item) => item.id === problem.id);
-    if (
-      !settings.value?.llmAutoGenerate ||
-      current?.status !== 'available' ||
-      (current.deadlineAt && current.deadlineAt <= Date.now())
-    )
-      return;
-    selectedProblemId.value = current.id;
-    aiSlideSelection.value = [];
-    void nextTick(() => analyzeProblem(true));
-  }, delay);
   scheduledProblems.set(problem.id, timer);
+}
+
+function cancelSubmissionTimers(): void {
+  automationEpoch++;
+  for (const timer of scheduledProblems.values()) clearTimeout(timer);
+  scheduledProblems.clear();
+  seenAvailableProblems.clear();
+}
+
+function resetAutomation(): void {
+  analysisEpoch++;
+  cancelSubmissionTimers();
+  preanalysis.reset();
+  preanalysisContext = '';
+}
+
+function problemImageUrls(problem: ProblemContext): readonly string[] {
+  const image = presentations.value
+    .find((item) => item.id === problem.presentationId)
+    ?.slides.find((slide) => slide.id === problem.slideId)?.imageUrl;
+  return image ? [image] : [];
+}
+
+function preanalyzeLoadedProblems(): Promise<void> {
+  if (
+    !settings.value?.llmAutoGenerate ||
+    !selectedLessonId.value ||
+    selectedLesson.value?.status === 'ended'
+  ) {
+    if (preanalysisContext) resetAutomation();
+    return Promise.resolve();
+  }
+  const profile = settings.value.aiProfiles.find(
+    (item) => item.id === settings.value?.activeAiProfileId,
+  );
+  const context = JSON.stringify([
+    props.environment,
+    selectedLessonId.value,
+    profile?.id,
+    profile?.providerId,
+    profile?.baseUrl,
+    profile?.model,
+    profile?.visionModel,
+    profile?.temperature,
+  ]);
+  if (preanalysisContext && preanalysisContext !== context) {
+    analysisEpoch++;
+    cancelSubmissionTimers();
+  }
+  preanalysisContext = context;
+  return preanalysis.sync(
+    context,
+    problems.value.map((problem) => ({
+      problem,
+      imageUrls: problemImageUrls(problem),
+    })),
+  );
+}
+
+async function emitAnalysisNotice(
+  kind: 'ai-analysis-started' | 'ai-analysis-finished',
+  batch: PreanalysisBatch,
+): Promise<void> {
+  await handleClassroomNotice({
+    kind,
+    lessonId: batch.lessonId,
+    dedupeKey: `${kind}:${props.environment}:${batch.lessonId}:${batch.id}`,
+    title:
+      kind === 'ai-analysis-started'
+        ? `AI 分析题目中，共 ${batch.total} 道题`
+        : `AI 分析了 ${batch.total} 道题`,
+    detail:
+      kind === 'ai-analysis-started'
+        ? '正在预分析已加载的题目，发布后按设置作答。'
+        : `成功 ${batch.succeeded} 道，失败 ${batch.failed} 道。`,
+    occurredAt: Date.now(),
+  });
 }
 
 async function refreshLogs(): Promise<void> {
@@ -2930,7 +3131,7 @@ function clamp(value: number, min: number, max: number): number {
                 <span>
                   <strong>LLM 自动生成答案</strong>
                   <small
-                    >检测到新题后自动生成答案；是否提交由下一项决定。</small
+                    >课件题目加载后立即预分析并缓存答案，不必等待老师发布。</small
                   >
                 </span>
                 <input
@@ -2947,7 +3148,7 @@ function clamp(value: number, min: number, max: number): number {
                 <span>
                   <strong>LLM 托管提交答案</strong>
                   <small
-                    >生成成功后由 Agent 校验并提交；关闭时仅保留 AI
+                    >老师发布题目后使用已分析的答案提交；关闭时仅保留 AI
                     回答。</small
                   >
                 </span>
@@ -2969,7 +3170,7 @@ function clamp(value: number, min: number, max: number): number {
               </label>
               <div class="paired-number-rows">
                 <label class="number-row">
-                  <span>生成延迟（秒）</span>
+                  <span>发布后提交延迟（秒）</span>
                   <input
                     v-model.number="settingsDraft.autoAnswerDelaySeconds"
                     type="number"
@@ -3000,7 +3201,7 @@ function clamp(value: number, min: number, max: number): number {
               <label class="switch-row">
                 <span>
                   <strong>课堂提醒</strong>
-                  <small>关闭后暂停下面所有课堂与 Agent 提醒。</small>
+                  <small>关闭后暂停下面所有课堂、AI 分析与作答提醒。</small>
                 </span>
                 <input v-model="settingsDraft.notifyProblems" type="checkbox" />
               </label>
@@ -3057,10 +3258,10 @@ function clamp(value: number, min: number, max: number): number {
                 </label>
                 <label>
                   <input
-                    v-model="settingsDraft.notifyOtherPublishes"
+                    v-model="settingsDraft.notifyLessonStarted"
                     type="checkbox"
                   />
-                  <span>其他发布</span>
+                  <span>课堂开始</span>
                 </label>
                 <label>
                   <input
@@ -3071,31 +3272,31 @@ function clamp(value: number, min: number, max: number): number {
                 </label>
                 <label>
                   <input
-                    v-model="settingsDraft.notifyAutoAnswerScheduled"
+                    v-model="settingsDraft.notifyAiAnalysisStarted"
                     type="checkbox"
                   />
-                  <span>Agent 已排队</span>
+                  <span>AI 分析开始</span>
                 </label>
                 <label>
                   <input
-                    v-model="settingsDraft.notifyAutoAnswerStarted"
+                    v-model="settingsDraft.notifyAiAnalysisFinished"
                     type="checkbox"
                   />
-                  <span>Agent 已开始</span>
+                  <span>AI 分析完成</span>
                 </label>
                 <label>
                   <input
-                    v-model="settingsDraft.notifyAutoAnswerSucceeded"
+                    v-model="settingsDraft.notifyAnswerSucceeded"
                     type="checkbox"
                   />
-                  <span>Agent 已提交</span>
+                  <span>作答成功</span>
                 </label>
                 <label>
                   <input
-                    v-model="settingsDraft.notifyAutoAnswerFailed"
+                    v-model="settingsDraft.notifyAnswerFailed"
                     type="checkbox"
                   />
-                  <span>Agent 失败</span>
+                  <span>作答失败</span>
                 </label>
               </div>
             </fieldset>

@@ -10,6 +10,41 @@ import { SqliteAppDataStore } from './sqlite-app-data-store.js';
 import type { SecretCodec } from './types.js';
 
 describe('M5 persistent storage', () => {
+  it('migrates old reminder preferences and preserves newer individual switches', async () => {
+    const store = new SqliteAppDataStore(':memory:');
+    try {
+      // Emulate keys persisted by an older application version.
+      await store.updateSettings(
+        JSON.parse(
+          '{"notifyAutoAnswerStarted":false,"notifyAutoAnswerSucceeded":false,"notifyAutoAnswerFailed":false,"notifyOtherPublishes":false,"notifyAutoAnswerScheduled":true}',
+        ),
+      );
+      expect(await store.getSettings()).toMatchObject({
+        notifyAiAnalysisStarted: false,
+        notifyAiAnalysisFinished: false,
+        notifyAnswerSucceeded: false,
+        notifyAnswerFailed: false,
+        notifyLessonStarted: true,
+      });
+      await store.updateSettings({
+        notifyAiAnalysisFinished: true,
+        notifyAnswerFailed: true,
+      });
+      const migrated = await store.getSettings();
+      expect(migrated).toMatchObject({
+        notifyAiAnalysisStarted: false,
+        notifyAiAnalysisFinished: true,
+        notifyAnswerSucceeded: false,
+        notifyAnswerFailed: true,
+      });
+      expect(migrated).not.toHaveProperty('notifyOtherPublishes');
+      expect(migrated).not.toHaveProperty('notifyAutoAnswerScheduled');
+      expect(migrated).not.toHaveProperty('notifyAutoAnswerStarted');
+    } finally {
+      store.close();
+    }
+  });
+
   afterAll(async () => {
     await Promise.all(
       temporaryDirectories.map((path) =>

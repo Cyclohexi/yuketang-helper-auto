@@ -3,6 +3,22 @@ import { describe, expect, it } from 'vitest';
 import { getRealtimeEvent } from './services/classroom-events.js';
 
 describe('classroom realtime events', () => {
+  it('retains lesson start/end and assessment events while discarding other publishes', () => {
+    expect(getRealtimeEvent({ op: 'lessonStarted' })).toEqual({
+      kind: 'lessonstarted',
+    });
+    expect(getRealtimeEvent({ op: 'lessonfinished' })).toEqual({
+      kind: 'lessonfinished',
+    });
+    expect(
+      getRealtimeEvent({ op: 'publishquiz', quiz: { id: 'quiz-1' } }),
+    ).toMatchObject({
+      kind: 'publish',
+      notice: { kind: 'assessment-publish' },
+    });
+    expect(getRealtimeEvent({ op: 'publishactivity' })).toBeNull();
+  });
+
   it('normalizes object and scalar problem publish messages', () => {
     expect(
       getRealtimeEvent({

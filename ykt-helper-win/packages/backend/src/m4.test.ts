@@ -712,6 +712,7 @@ describe('M4 backend active client', () => {
       }),
     );
     expect(notices.map((notice) => notice.kind)).toEqual([
+      'lesson-started',
       'courseware-publish',
       'problem-start',
       'lesson-finished',
