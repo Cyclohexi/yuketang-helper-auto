@@ -4,16 +4,28 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it } from 'vitest';
-import { preparePortableUpdate } from '../../apps/desktop/main/portable-update.js';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  launchPortableUpdate,
+  preparePortableUpdate,
+} from '../../apps/desktop/main/portable-update.js';
 
 const exec = promisify(execFile);
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     directories
       .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+      .map((path) =>
+        rm(path, {
+          recursive: true,
+          force: true,
+          maxRetries: 10,
+          retryDelay: 100,
+        }),
+      ),
   );
 });
 async function powershell(script: string, args: string[] = []) {
@@ -180,6 +192,77 @@ describe.runIf(process.platform === 'win32')(
       await expect(
         preparePortableUpdate({ ...job, sha256: '0'.repeat(64) }),
       ).rejects.toThrow(/checksum mismatch/);
+      expect(await readFile(job.executable, 'utf8')).toBe('old exe');
+    }, 30_000);
+    it('acknowledges startup and survives the real caller exiting before applying', async () => {
+      const { directory, job, target } = await fixture({}, true);
+      await preparePortableUpdate(job);
+      const script = join(directory, 'updater.ps1');
+      await writeFile(
+        script,
+        (await readFile(script, 'utf8')).replace(
+          "$ErrorActionPreference = 'Stop'",
+          "$NoRestart = $true\n$ErrorActionPreference = 'Stop'",
+        ),
+      ); // Fixture executables are text; real GUI restart is separately verified.
+      const moduleUrl = pathToFileURL(
+        join(process.cwd(), 'apps/desktop/main/portable-update.ts'),
+      ).href;
+      const childCode = `
+        import { readFile, writeFile } from 'node:fs/promises';
+        import { join } from 'node:path';
+        const { launchPortableUpdate } = await import(${JSON.stringify(moduleUrl)});
+        const directory = process.argv[1];
+        const file = join(directory, 'job.json');
+        const config = JSON.parse(await readFile(file, 'utf8'));
+        config.parentPid = process.pid;
+        await writeFile(file, JSON.stringify(config));
+        await launchPortableUpdate(directory);
+        process.exit(0);
+      `;
+      await exec(
+        process.execPath,
+        ['--input-type=module', '-e', childCode, directory],
+        { windowsHide: true, timeout: 20_000 },
+      );
+      await vi.waitFor(
+        async () => {
+          const result = JSON.parse(
+            (await readFile(job.resultPath, 'utf8')).replace(/^\uFEFF/, ''),
+          );
+          expect(result.success).toBe(true);
+          expect(await readFile(job.executable, 'utf8')).toBe('new exe');
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+      expect(
+        await readFile(join(target, 'ykt-helper-data/settings.json'), 'utf8'),
+      ).toBe('precious settings');
+      const log = await readFile(
+        join(target, '..', `installer-${job.id}.log`),
+        'utf8',
+      );
+      expect(log).toContain('waiting-for-application-exit');
+      expect(log).toContain('installed');
+    }, 30_000);
+    it('rejects a worker that exits without acknowledging instead of allowing app shutdown', async () => {
+      const { directory, job } = await fixture();
+      await preparePortableUpdate(job);
+      await writeFile(join(directory, 'updater.ps1'), 'exit 0');
+      const failed = expect(launchPortableUpdate(directory)).rejects.toThrow(
+        '未就绪',
+      );
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await readFile(join(directory, 'launch.log'), 'utf8')).length,
+          ).toBeGreaterThan(0);
+        },
+        { timeout: 5000 },
+      );
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(15_100);
+      await failed;
       expect(await readFile(job.executable, 'utf8')).toBe('old exe');
     }, 30_000);
   },

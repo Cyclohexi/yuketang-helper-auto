@@ -1,7 +1,8 @@
-import { execFile, spawn } from 'node:child_process';
-import { writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const execFileAsync = promisify(execFile);
 
@@ -103,11 +104,24 @@ $written = New-Object 'System.Collections.Generic.List[string]'
 $success = $false
 $restored = $false
 $message = ''
+$logPath = Join-Path (Split-Path -Parent $config.resultPath) ('installer-' + $config.id + '.log')
+function Write-UpdateLog([string]$event, [string]$detail = '') {
+  $record = @{ time = [DateTime]::UtcNow.ToString('o'); event = $event; detail = $detail } | ConvertTo-Json -Compress
+  [IO.File]::AppendAllText($logPath, $record + [Environment]::NewLine, [Text.Encoding]::UTF8)
+}
 try {
+  Write-UpdateLog 'started'
+  $parent = $null
   if ($config.parentPid -gt 0) {
     $parent = Get-Process -Id $config.parentPid -ErrorAction SilentlyContinue
-    if ($parent -and -not $parent.WaitForExit(120000)) { throw 'Application did not exit; update cancelled.' }
+    if ($parent) { $null = $parent.Handle }
   }
+  # A successful CreateProcess is not proof that PowerShell loaded the script.
+  # The application must wait for this acknowledgement before exiting.
+  [IO.File]::WriteAllText((Join-Path $jobRoot 'ready.json'), (@{ id = $config.id; pid = $PID } | ConvertTo-Json -Compress), [Text.Encoding]::UTF8)
+  Write-UpdateLog 'waiting-for-application-exit'
+  if ($parent -and -not $parent.WaitForExit(120000)) { throw 'Application did not exit; update cancelled.' }
+  Write-UpdateLog 'installing'
   New-Item -ItemType Directory -Path $backup | Out-Null
   foreach ($entry in $entries) {
     $destination = Join-Path $target $entry.Name
@@ -123,8 +137,10 @@ try {
   }
   $success = $true
   $message = 'Update installed.'
+  Write-UpdateLog 'installed' $config.version
 } catch {
   $message = $_.Exception.Message
+  Write-UpdateLog 'failed' $message
   # Roll back only entries touched by this update.
   try {
     foreach ($name in $written) {
@@ -141,11 +157,17 @@ try {
     ConvertTo-Json | Set-Content -LiteralPath $config.resultPath -Encoding UTF8
 }
 if ($success) { Remove-Item -LiteralPath $backup -Recurse -Force }
-if (-not $NoRestart -and ($success -or $restored)) {
-  Start-Process -FilePath (Join-Path $target $exeName) -WorkingDirectory $target -WindowStyle Hidden
+# Remove staging before the new version starts: first-run profile migration
+# must not copy a job that this worker is deleting concurrently.
+if ($success -or $restored) {
+  try { Remove-Item -LiteralPath $jobRoot -Recurse -Force }
+  catch { Write-UpdateLog 'cleanup-failed' $_.Exception.Message }
 }
-# jobRoot is the dedicated update job directory; never the installation root.
-if ($success -or $restored) { Remove-Item -LiteralPath $jobRoot -Recurse -Force }
+if (-not $NoRestart -and ($success -or $restored)) {
+  Write-UpdateLog 'restarting'
+  Start-Process -FilePath (Join-Path $target $exeName) -WorkingDirectory $target -WindowStyle Normal
+  Write-UpdateLog 'restart-requested'
+}
 if (-not $success) { exit 1 }
 `;
 
@@ -158,6 +180,22 @@ export interface PortableUpdateJob {
   sha256: string;
   size: number;
 }
+
+// Start-Process creates the long-running worker independently of Node's child
+// process job. Direct detached PowerShell may exit without running its script;
+// a direct non-detached child can be terminated when Electron exits on Windows.
+const PORTABLE_LAUNCH_SCRIPT = String.raw`
+param([Parameter(Mandatory=$true)][string]$Directory)
+$ErrorActionPreference = 'Stop'
+$arguments = @(
+  '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+  '-File', ('"' + (Join-Path $Directory 'updater.ps1') + '"'),
+  '-ConfigPath', ('"' + (Join-Path $Directory 'job.json') + '"'),
+  '-Mode', 'apply'
+)
+$worker = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory (Split-Path -Parent $Directory) -WindowStyle Hidden -PassThru
+@{ pid = $worker.Id } | ConvertTo-Json -Compress
+`;
 
 export async function preparePortableUpdate(
   job: PortableUpdateJob,
@@ -192,20 +230,57 @@ export async function preparePortableUpdate(
 }
 
 export async function launchPortableUpdate(directory: string): Promise<void> {
-  const child = spawn(
-    'powershell.exe',
-    powershellArguments(directory, 'apply'),
-    {
-      detached: true,
-      windowsHide: true,
-      stdio: 'ignore',
-    },
+  const config = JSON.parse(
+    await readFile(join(directory, 'job.json'), 'utf8'),
   );
-  await new Promise<void>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('spawn', resolve);
-  });
-  child.unref();
+  const readyPath = join(directory, 'ready.json');
+  await rm(readyPath, { force: true });
+  const launcherPath = join(directory, 'start-updater.ps1');
+  await writeFile(launcherPath, PORTABLE_LAUNCH_SCRIPT, 'utf8');
+  try {
+    const { stdout } = await execFileAsync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        launcherPath,
+        '-Directory',
+        directory,
+      ],
+      { windowsHide: true, timeout: 15_000, cwd: dirname(directory) },
+    );
+    await writeFile(join(directory, 'launch.log'), stdout, 'utf8');
+    const worker = JSON.parse(stdout.replace(/^\uFEFF/, '').trim());
+    if (!Number.isSafeInteger(worker.pid) || worker.pid <= 0)
+      throw new Error('更新安装进程未返回有效进程编号。');
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      try {
+        const ready = JSON.parse(
+          (await readFile(readyPath, 'utf8')).replace(/^\uFEFF/, ''),
+        );
+        if (ready.id === config.id && ready.pid === worker.pid) return;
+      } catch (error) {
+        if (
+          !(error instanceof SyntaxError) &&
+          (error as NodeJS.ErrnoException).code !== 'ENOENT'
+        )
+          throw error;
+      }
+      await delay(50);
+    }
+    throw new Error('更新安装进程未就绪，程序未退出，请查看更新日志后重试。');
+  } catch (error) {
+    await writeFile(
+      join(directory, 'launch-error.log'),
+      error instanceof Error ? error.message : String(error),
+      'utf8',
+    ).catch(() => {});
+    throw error;
+  }
 }
 
 function powershellArguments(directory: string, mode: string): string[] {

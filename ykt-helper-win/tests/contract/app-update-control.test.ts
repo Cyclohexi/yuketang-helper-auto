@@ -87,4 +87,25 @@ describe('app update control', () => {
     await nextTick();
     expect(api.checkAppUpdate).toHaveBeenCalledOnce();
   });
+  it('shows reconnection progress and resumes a failed download directly', async () => {
+    const { host, api, notify } = await mount('downloading');
+    notify({
+      phase: 'downloading',
+      progress: 7,
+      retryAttempt: 1,
+      message: '网络波动，正在自动重试',
+    });
+    await nextTick();
+    expect(host.querySelector('button')!.textContent).toContain('重连中 · 7%');
+    expect(host.querySelector('button')!.disabled).toBe(true);
+    notify({ phase: 'error', progress: 7, message: '已保留下载进度' });
+    await nextTick();
+    expect(host.querySelector('button')!.textContent).toContain(
+      '下载中断 · 继续',
+    );
+    host.querySelector('button')!.click();
+    await nextTick();
+    expect(api.downloadAppUpdate).toHaveBeenCalledOnce();
+    expect(api.checkAppUpdate).not.toHaveBeenCalled();
+  });
 });

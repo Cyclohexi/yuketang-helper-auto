@@ -15,6 +15,8 @@ const label = computed(() => {
     case 'available':
       return `下载新版 ${state.value.latestVersion}`;
     case 'downloading':
+      if (state.value.retryAttempt)
+        return `重连中 · ${state.value.progress ?? 0}%`;
       return state.value.progress === undefined
         ? '更新下载中…'
         : `下载 ${state.value.progress}%`;
@@ -23,6 +25,7 @@ const label = computed(() => {
     case 'installing':
       return '正在安装…';
     case 'error':
+      if (state.value.progress !== undefined) return '下载中断 · 继续';
       return '更新失败 · 重试';
     case 'current':
       return `v${state.value.currentVersion} · 已是最新`;
@@ -49,7 +52,10 @@ onUnmounted(() => unsubscribe?.());
 async function act(): Promise<void> {
   error.value = '';
   try {
-    if (state.value?.phase === 'available')
+    if (
+      state.value?.phase === 'available' ||
+      (state.value?.phase === 'error' && state.value.progress !== undefined)
+    )
       state.value = await window.yuketang.downloadAppUpdate();
     else if (state.value?.phase === 'ready') {
       if (

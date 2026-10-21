@@ -1,5 +1,5 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, open, readFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { AppUpdateState } from '@ykt/contracts';
@@ -19,6 +19,13 @@ import {
   type PortableManifest,
   type UpdateRelease,
 } from './update-release.js';
+import {
+  downloadUpdateArchive,
+  retryableUpdateError,
+  UpdateTransferError,
+  updateHttpError,
+  waitForUpdateRetry,
+} from './update-download.js';
 
 export interface AppUpdateOptions {
   version: string;
@@ -130,7 +137,13 @@ export class AppUpdateController {
   }
 
   async download(): Promise<AppUpdateState> {
-    if (this.blocked() || this.#state.phase !== 'available' || !this.#release)
+    if (
+      this.blocked() ||
+      !this.#release ||
+      !this.#manifest ||
+      (this.#state.phase !== 'available' &&
+        !(this.#state.phase === 'error' && this.#state.progress !== undefined))
+    )
       return this.getState();
     this.#busy = true;
     this.set({
@@ -142,6 +155,7 @@ export class AppUpdateController {
       await mkdir(this.options.directory, { recursive: true });
       this.#jobDirectory = await mkdtemp(join(this.options.directory, 'job-'));
       await this.downloadArchive(manifest, this.#release);
+      this.#abort?.signal.throwIfAborted();
       await (this.options.preparePortable ?? preparePortableUpdate)({
         directory: this.#jobDirectory,
         id: randomUUID(),
@@ -162,7 +176,12 @@ export class AppUpdateController {
           () => {},
         );
       this.#jobDirectory = undefined;
-      this.fail(error);
+      this.fail(
+        error,
+        error instanceof UpdateTransferError && error.discardPartial
+          ? 0
+          : (this.#state.progress ?? 0),
+      );
     } finally {
       this.#busy = false;
     }
@@ -207,23 +226,42 @@ export class AppUpdateController {
 
   private async json(url: string): Promise<unknown> {
     this.#abort = new AbortController();
+    for (let attempt = 0; ; attempt++) {
+      this.#abort.signal.throwIfAborted();
+      try {
+        return await this.jsonAttempt(url, this.#abort.signal);
+      } catch (error) {
+        this.#abort.signal.throwIfAborted();
+        if (
+          attempt >= 2 ||
+          !retryableUpdateError(error) ||
+          error instanceof SyntaxError
+        )
+          throw error;
+        await waitForUpdateRetry(1000 * (attempt + 1), this.#abort.signal);
+      }
+    }
+  }
+
+  private async jsonAttempt(
+    url: string,
+    signal: AbortSignal,
+  ): Promise<unknown> {
     const response = await this.options.fetch(url, {
       headers: {
         Accept: 'application/vnd.github+json',
         'User-Agent': 'YuketangHelper-Updater',
       },
-      signal: AbortSignal.any([
-        this.#abort.signal,
-        AbortSignal.timeout(30_000),
-      ]),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
       cache: 'no-store',
     });
-    if (!response.ok)
-      throw new Error(
-        `更新源访问失败（HTTP ${response.status}），请检查网络后重试。`,
-      );
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw updateHttpError(response.status);
+    }
     const text = await response.text();
-    if (text.length > 1024 * 1024) throw new Error('更新源响应过大。');
+    if (text.length > 1024 * 1024)
+      throw new UpdateTransferError('更新源响应过大。');
     return JSON.parse(text);
   }
 
@@ -232,53 +270,38 @@ export class AppUpdateController {
     release: UpdateRelease,
   ): Promise<void> {
     this.#abort = new AbortController();
-    const response = await this.options.fetch(
-      `${releaseDownloadBase(release.tag)}/${manifest.file}`,
-      {
-        signal: AbortSignal.any([
-          this.#abort.signal,
-          AbortSignal.timeout(15 * 60 * 1000),
-        ]),
-      },
-    );
-    if (!response.ok || !response.body)
-      throw new Error(`更新包下载失败（HTTP ${response.status}）。`);
-    const file = await open(join(this.#jobDirectory!, 'update.zip'), 'wx');
-    const hash = createHash('sha256');
-    let size = 0;
-    let lastProgress = -1;
-    const reader = response.body.getReader();
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > manifest.size) throw new Error('更新包超出清单声明大小。');
-        hash.update(value);
-        await file.writeFile(value);
-        const progress = Math.floor((size * 100) / manifest.size);
-        if (progress !== lastProgress) {
-          lastProgress = progress;
+    const path = await downloadUpdateArchive({
+      manifest,
+      url: `${releaseDownloadBase(release.tag)}/${manifest.file}`,
+      directory: this.options.directory,
+      fetch: this.options.fetch,
+      signal: AbortSignal.any([
+        this.#abort.signal,
+        AbortSignal.timeout(45 * 60 * 1000),
+      ]),
+      onProgress: (progress) => {
+        if (this.#state.progress !== progress || this.#state.retryAttempt)
           this.set({
-            ...this.#state,
+            phase: 'downloading',
             progress,
             message: `正在下载更新 ${progress}%…`,
           });
-        }
-      }
-    } finally {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-      await file.close();
-    }
-    if (size !== manifest.size || hash.digest('hex') !== manifest.sha256) {
-      throw new Error('更新包完整性校验失败，已取消更新，请重试。');
-    }
+      },
+      onRetry: (progress, attempt, milliseconds) =>
+        this.set({
+          phase: 'downloading',
+          progress,
+          retryAttempt: attempt,
+          message: `网络波动，已保留 ${progress}%：${milliseconds / 1000} 秒后自动重试（${attempt}/5）…`,
+        }),
+    });
+    await copyFile(path, join(this.#jobDirectory!, 'update.zip'));
   }
 
-  private fail(error: unknown): void {
+  private fail(error: unknown, progress?: number): void {
     this.set({
       phase: 'error',
+      ...(progress === undefined ? {} : { progress }),
       message: `更新失败：${error instanceof Error ? error.message.slice(0, 500) : '请检查网络后重试。'}`,
     });
   }

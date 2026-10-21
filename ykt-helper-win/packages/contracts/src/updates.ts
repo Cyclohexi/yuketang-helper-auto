@@ -15,5 +15,6 @@ export interface AppUpdateState {
   readonly currentVersion: string;
   readonly latestVersion?: string;
   readonly progress?: number;
+  readonly retryAttempt?: number;
   readonly message: string;
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -56,7 +56,7 @@ async function setup(
     mode,
     executable: join(directory, 'app', 'YuketangHelper.exe'),
     directory,
-    fetch: vi.fn(async (url: string) =>
+    fetch: vi.fn(async (url: string, _init?: RequestInit) =>
       url.endsWith('.zip')
         ? new Response(content as BodyInit)
         : Response.json(url.endsWith('.json') ? manifest : release()),
@@ -235,5 +235,46 @@ describe('app update lifecycle', () => {
     await controller.install();
     expect(controller.getState().phase).toBe('disabled');
     expect(options.fetch).not.toHaveBeenCalled();
+  });
+  it('retains progress on failure and lets the retry button resume directly', async () => {
+    const { controller, options } = await setup();
+    const path = join(options.directory, `download-${manifest.sha256}.part`);
+    await writeFile(path, archive.subarray(0, 7));
+    await controller.check();
+    options.fetch.mockResolvedValueOnce(new Response('', { status: 403 }));
+    await controller.download();
+    expect(controller.getState()).toMatchObject({
+      phase: 'error',
+      progress: Math.floor(700 / archive.length),
+    });
+    expect(options.preparePortable).not.toHaveBeenCalled();
+    options.fetch.mockResolvedValueOnce(
+      new Response(archive.subarray(7), {
+        status: 206,
+        headers: {
+          'Content-Range': `bytes 7-${archive.length - 1}/${archive.length}`,
+        },
+      }),
+    );
+    await controller.download();
+    expect(controller.getState().phase).toBe('ready');
+    expect(
+      new Headers(options.fetch.mock.calls.at(-1)![1]!.headers).get('range'),
+    ).toBe(`bytes=7-${archive.length - 1}`);
+    expect(options.fetch).toHaveBeenCalledTimes(4);
+  });
+  it('retries transient release metadata errors without duplicate checks', async () => {
+    const { controller, options } = await setup();
+    options.fetch.mockResolvedValueOnce(new Response('', { status: 503 }));
+    vi.useFakeTimers();
+    try {
+      const pending = controller.check();
+      await vi.advanceTimersByTimeAsync(1000);
+      await pending;
+      expect(controller.getState().phase).toBe('available');
+      expect(options.fetch).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
