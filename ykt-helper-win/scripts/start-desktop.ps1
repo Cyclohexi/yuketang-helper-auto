@@ -1,6 +1,7 @@
 ﻿param(
   [switch]$CheckOnly,
   [switch]$Rebuild,
+  [switch]$DebugProfile,
   [switch]$ShowConsole,
   [switch]$Worker
 )
@@ -45,12 +46,42 @@ function Test-SourceBuildRequired {
   return $false
 }
 
+function Close-PreviousDesktopWindow {
+  # Match this checkout or a verified portable product, never generic Electron
+  # apps. An old portable window can otherwise take over the shared profile lock.
+  $processName = [IO.Path]::GetFileNameWithoutExtension($electronPath)
+  $candidates = @(Get-Process -Name @($processName, 'YuketangHelper', '雨课堂助手') -ErrorAction SilentlyContinue)
+  foreach ($candidate in $candidates) {
+    if ($candidate.MainWindowHandle -eq [IntPtr]::Zero -or
+        $candidate.SessionId -ne [Diagnostics.Process]::GetCurrentProcess().SessionId) { continue }
+    $isSource = $candidate.Path -ieq $electronPath
+    $isPortable = -not $DebugProfile -and
+      $candidate.ProcessName -in @('YuketangHelper', '雨课堂助手') -and
+      $candidate.MainModule.FileVersionInfo.ProductName -eq '雨课堂助手'
+    if (-not $isSource -and -not $isPortable) { continue }
+    $details = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = " + $candidate.Id)
+    if ($null -eq $details -or -not $details.CommandLine) {
+      throw '无法确认已有源码窗口，请先退出雨课堂助手后重新启动。'
+    }
+    $usesDebugProfile = $details.CommandLine -match '(?i)(?:^|\s)--debug-profile(?:\s|$)'
+    if ($usesDebugProfile -ne [bool]$DebugProfile) { continue }
+    Write-Host '检测到雨课堂助手已有窗口，正在正常关闭并重新启动，以加载最新源码…'
+    if (-not $candidate.CloseMainWindow()) {
+      throw '无法正常关闭已有源码窗口，请先退出雨课堂助手后重新启动。'
+    }
+    if (-not $candidate.WaitForExit(15000)) {
+      throw '已有源码窗口尚未退出，请完成当前操作并退出后重新启动。'
+    }
+  }
+}
+
 try {
   # Start the worker in its own hidden console. The original BAT can then exit
   # without Electron keeping a Windows Terminal tab open through inherited I/O.
   if (-not $CheckOnly -and -not $ShowConsole -and -not $Worker) {
     $workerArguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'), '-Worker')
     if ($Rebuild) { $workerArguments += '-Rebuild' }
+    if ($DebugProfile) { $workerArguments += '-DebugProfile' }
     Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $workerArguments -WindowStyle Hidden
     exit 0
   }
@@ -93,11 +124,19 @@ try {
   if ($null -eq $plan) {
     throw "未找到本地运行依赖。请先在 $projectDirectory 执行 npm ci --include=dev --include=optional，再双击启动。"
   }
+  if ($DebugProfile -and $plan.mode -ne 'source') {
+    throw '独立调试配置需要本地源码运行依赖，不能回退旧便携版。'
+  }
+  if ($plan.mode -eq 'source') {
+    $plan | Add-Member -NotePropertyName arguments -NotePropertyValue @($desktopDirectory)
+    if ($DebugProfile) { $plan.arguments += '--debug-profile' }
+  }
   if ($CheckOnly) {
     $plan | ConvertTo-Json -Compress
     exit 0
   }
   Write-Host '雨课堂助手启动器' -ForegroundColor Green
+  if ($plan.mode -eq 'source') { Close-PreviousDesktopWindow }
   if ($plan.buildRequired) {
     $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if ($null -eq $npm) { throw '构建源码需要 Node.js 24 和 npm 11，请先配置开发环境。' }
@@ -113,7 +152,10 @@ try {
   # Windows paths stay in structured arguments, including spaces, Chinese,
   # parentheses, ampersands, and exclamation marks.
   $startOptions = @{ FilePath = $plan.executable; WorkingDirectory = $plan.workingDirectory; WindowStyle = 'Normal'; PassThru = $true }
-  if ($plan.mode -eq 'source') { $startOptions.ArgumentList = '.' }
+  if ($plan.mode -eq 'source') {
+    $startOptions.ArgumentList = @('"' + $desktopDirectory + '"')
+    if ($DebugProfile) { $startOptions.ArgumentList += '--debug-profile' }
+  }
   if ($Worker) {
     $startOptions.RedirectStandardOutput = Join-Path $logDirectory ($runId + '-desktop-out.log')
     $startOptions.RedirectStandardError = Join-Path $logDirectory ($runId + '-desktop-error.log')

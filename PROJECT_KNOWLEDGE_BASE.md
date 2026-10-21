@@ -79,6 +79,8 @@ README 下载与三步上手前置；首次配置截图折叠，刷课截图位�
 
 默认通过独立隐藏 PowerShell 进程启动，原 BAT 命令窗口退出，桌面程序保持正常显示。后台输出重定向到 `%LOCALAPPDATA%\YuketangHelperLauncher\logs`，失败时显示错误弹窗；`-ShowConsole` 保留前台日志，`-CheckOnly` 保留 JSON 输出。不要把桌面程序本身设为隐藏，也不要隐藏用户整个 Windows Terminal 的其他标签。
 
+源码启动前正常关闭本项目同配置的已有源码窗口，以及可能接管共用 profile 的便携版窗口，再启动最新构建；不能仅依赖 Electron 的 second-instance 聚焦旧窗口。筛选当前 Windows 会话、可见主窗口、源码可执行路径或便携版名称与产品信息，排除 Chromium 子进程和其他 Electron 应用。仅调用正常关闭，15 秒未退出则停止并提示，不强制结束。`-DebugProfile` 透传隔离标志，只处理同配置源码窗口，不关闭正式程序或回退旧便携版；`-CheckOnly` 不影响运行中实例。源码以绝对目录参数启动，避免入口路径歧义。
+
 在核心工程目录执行：
 
 ```powershell

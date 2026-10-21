@@ -79,6 +79,7 @@ async function check(root: string): Promise<{
   executable: string;
   workingDirectory: string;
   buildRequired: boolean;
+  arguments?: string[];
 }> {
   // Execute the actual .bat through cmd, including its quoting and encoding.
   const command = `""${join(root, '启动雨课堂助手.bat')}" -CheckOnly"`;
@@ -91,6 +92,32 @@ async function check(root: string): Promise<{
 }
 
 describe.runIf(process.platform === 'win32')('Windows quick launcher', () => {
+  it.each([false, true])(
+    'normally closes only the visible source window for debug profile=%s',
+    async (debugProfile) => {
+      const { stdout } = await checkPreviousWindows(debugProfile);
+      expect(JSON.parse(stdout.trim())).toEqual(debugProfile ? [2] : [1, 5]);
+    },
+    20_000,
+  );
+  it('stops instead of force-killing a source window that cannot exit', async () => {
+    await expect(checkPreviousWindows(false, false)).rejects.toThrow(
+      /尚未退出/,
+    );
+  }, 20_000);
+  it('forwards the isolated profile flag through the BAT worker', async () => {
+    const { root, project } = await fixture();
+    const command = `""${join(root, '启动雨课堂助手.bat')}" -CheckOnly -DebugProfile"`;
+    const { stdout } = await exec('cmd.exe', ['/d', '/s', '/c', command], {
+      windowsVerbatimArguments: true,
+      windowsHide: true,
+      timeout: 15_000,
+    });
+    expect(JSON.parse(stdout.trim())).toMatchObject({
+      mode: 'source',
+      arguments: [join(project, 'apps/desktop'), '--debug-profile'],
+    });
+  }, 20_000);
   it('runs through cmd from a path with Chinese, spaces, parentheses, ampersands and exclamation marks', async () => {
     const { root, project } = await fixture();
     const portable = join(project, 'desktop/out/雨课堂助手-win32-x64');
@@ -201,3 +228,55 @@ describe.runIf(process.platform === 'win32')('Windows quick launcher', () => {
     ).toContain('fixture diagnostic');
   }, 20_000);
 });
+
+async function checkPreviousWindows(debugProfile: boolean, canExit = true) {
+  // Evaluate only the actual close routine; fixture process objects prevent
+  // this regression test from touching real desktop windows or user data.
+  const script = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$launcherPath = $env:YKT_LAUNCHER_UNDER_TEST
+$tokens = $null; $parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($launcherPath, [ref]$tokens, [ref]$parseErrors)
+$definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Close-PreviousDesktopWindow' }, $true)
+Invoke-Expression $definition.Extent.Text
+$electronPath = 'C:\\checkout\\electron.exe'
+$DebugProfile = ${debugProfile ? '$true' : '$false'}
+$script:closed = New-Object 'Collections.Generic.List[int]'
+$script:canExit = ${canExit ? '$true' : '$false'}
+function Get-Process {
+  foreach ($item in @(
+    @{ Id = 1; Path = $electronPath; MainWindowHandle = [IntPtr]1 },
+    @{ Id = 2; Path = $electronPath; MainWindowHandle = [IntPtr]2 },
+    @{ Id = 3; Path = 'C:\\other-app\\electron.exe'; MainWindowHandle = [IntPtr]3 },
+    @{ Id = 4; Path = $electronPath; MainWindowHandle = [IntPtr]0 },
+    @{ Id = 5; Path = 'D:\\portable\\YuketangHelper.exe'; MainWindowHandle = [IntPtr]5; ProcessName = 'YuketangHelper'; MainModule = @{ FileVersionInfo = @{ ProductName = '雨课堂助手' } } },
+    @{ Id = 6; Path = 'D:\\other\\YuketangHelper.exe'; MainWindowHandle = [IntPtr]6; ProcessName = 'YuketangHelper'; MainModule = @{ FileVersionInfo = @{ ProductName = 'Other App' } } }
+  )) {
+    $process = [pscustomobject]$item
+    $process | Add-Member NoteProperty SessionId ([Diagnostics.Process]::GetCurrentProcess().SessionId)
+    $process | Add-Member ScriptMethod CloseMainWindow { $script:closed.Add($this.Id); return $true }
+    $process | Add-Member ScriptMethod WaitForExit { return $script:canExit }
+    $process
+  }
+}
+function Get-CimInstance {
+  param($ClassName, $Filter)
+  if ($Filter -eq 'ProcessId = 2') { return [pscustomobject]@{ CommandLine = 'electron.exe . --debug-profile' } }
+  return [pscustomobject]@{ CommandLine = 'electron.exe .' }
+}
+Close-PreviousDesktopWindow 6>$null
+ConvertTo-Json -InputObject @($script:closed) -Compress
+`;
+  return exec('powershell.exe', ['-NoLogo', '-NoProfile', '-Command', script], {
+    windowsHide: true,
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      YKT_LAUNCHER_UNDER_TEST: join(
+        repository,
+        'ykt-helper-win/scripts/start-desktop.ps1',
+      ),
+    },
+  });
+}
