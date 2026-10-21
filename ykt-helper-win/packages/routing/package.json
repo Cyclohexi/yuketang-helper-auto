@@ -1,6 +1,6 @@
 {
   "name": "@ykt/routing",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@ykt/contracts": "2.2.0",
+    "@ykt/contracts": "2.2.1",
     "tough-cookie": "^6.0.0"
   }
 }

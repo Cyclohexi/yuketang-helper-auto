@@ -78,7 +78,7 @@ node node_modules/electron/install.js
 
 `Cannot find native binding` 的 npm optional-dependencies 提示不一定是真正原因；Windows 应用控制阻止加载也可能产生该提示（[Electron #52481](https://github.com/electron/electron/issues/52481)）。请根据内层 `cause` 排查，不要直接删除项目锁文件或关闭系统安全策略。下载失败时可使用本文末尾的 Electron 镜像配置后重试安装命令。
 
-## 课堂 AI 自动化（计划 v2.2.1，待用户测试）
+## 课堂 AI 自动化（v2.2.1）
 
 配置可用模型并开启“LLM 自动生成”后，通过“题目预分析”开关选择是否提前分析已加载的未发布题目；关闭预分析后只在发布后分析。每道题使用自身课件图，最多同时分析两道；发布与重复刷新复用缓存。开启“LLM 托管提交”后，老师发布题目时按“发布后提交延迟”提交；关闭托管仍可分析、手动核对。
 
@@ -86,7 +86,7 @@ node node_modules/electron/install.js
 
 分析开始提示本批题数，结束汇总总数、成功和失败数；提交结果独立提醒。设置页保留课堂事件、分析及作答的九项开关，以及总开关、通知方式和提示音设置。队列、取消、重试与兼容规则见[课堂 AI 说明](docs/classroom-ai.md)。
 
-这三个功能先校验、同步源码供用户测试，测试通过后才发布 v2.2.1；当前不更改公开 Release、标签或发行包。发布说明草稿见 [v2.2.1](docs/release-notes-v2.2.1.md)。
+这三个功能已通过用户源码测试，随 v2.2.1 发布；发布说明见 [v2.2.1](docs/release-notes-v2.2.1.md)。后续版本须使用递增版本号，不覆盖已有公开标签及发行包。
 
 ## 作业 / 考试
 
