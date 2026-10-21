@@ -63,6 +63,7 @@ export class ClassroomPreanalysis {
   sync(
     context: string,
     questions: readonly PreanalysisQuestion[],
+    options: { includeExpired?: boolean } = {},
   ): Promise<void> {
     if (this.context !== context) {
       this.reset();
@@ -79,7 +80,11 @@ export class ClassroomPreanalysis {
     }
     for (const question of questions) {
       const { problem, imageUrls } = question;
-      if (problem.status !== 'locked' && problem.status !== 'available')
+      if (
+        problem.status !== 'locked' &&
+        problem.status !== 'available' &&
+        !(options.includeExpired && problem.status === 'expired')
+      )
         continue;
       const fingerprint = JSON.stringify([
         problem.type,

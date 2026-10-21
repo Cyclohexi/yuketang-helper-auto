@@ -31,6 +31,9 @@ export interface AppSettings {
   readonly autoJoinEnabled: boolean;
   readonly llmAutoGenerate: boolean;
   readonly llmManagedSubmit: boolean;
+  readonly aiPreanalysisEnabled: boolean;
+  readonly aiAutoRetryEnabled: boolean;
+  readonly autoForceRetryEnabled: boolean;
   readonly autoAnswerDelay: number;
   readonly autoAnswerRandomDelay: number;
   readonly keepScreenAwake: boolean;
@@ -69,6 +72,9 @@ export const DefaultAppSettings: AppSettings = Object.freeze({
   autoJoinEnabled: false,
   llmAutoGenerate: false,
   llmManagedSubmit: false,
+  aiPreanalysisEnabled: true,
+  aiAutoRetryEnabled: false,
+  autoForceRetryEnabled: false,
   autoAnswerDelay: 3000,
   autoAnswerRandomDelay: 2000,
   keepScreenAwake: false,

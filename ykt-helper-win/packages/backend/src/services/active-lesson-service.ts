@@ -195,6 +195,7 @@ export class ActiveLessonService {
       problem,
       validation.normalizedAnswer,
       input.forceRetry ?? false,
+      input.confirmedBy === 'agent',
     );
     this.repository
       .getSession(problem.lessonId)
@@ -226,8 +227,29 @@ export class ActiveLessonService {
     problem: ProblemContext,
     answer: AnswerValue,
     forceRetry: boolean,
+    agent = false,
     retried = false,
   ): Promise<'answer' | 'retry'> {
+    if (agent) {
+      const settings = await this.storage.getSettings();
+      problem = this.#problems.getProblem(problem.id);
+      if (!settings.llmAutoGenerate || !settings.llmManagedSubmit)
+        throw new Error('LLM 托管提交已关闭。');
+      if (
+        problem.status === 'locked' ||
+        problem.status === 'answered' ||
+        this.repository.getSession(problem.lessonId)?.lesson.status !== 'active'
+      )
+        throw new Error('题目尚未发布、已经作答或课堂已结束，不能自动提交。');
+      if (
+        (forceRetry ||
+          problem.status === 'expired' ||
+          (problem.deadlineAt !== null &&
+            this.clock.now() >= problem.deadlineAt)) &&
+        !settings.autoForceRetryEnabled
+      )
+        throw new Error('题目已截止，自动强制补交未开启。');
+    }
     const plan = planSubmission({
       problem,
       answer,
@@ -261,6 +283,7 @@ export class ActiveLessonService {
         problem,
         answer,
         forceRetry,
+        agent,
         true,
       );
     }

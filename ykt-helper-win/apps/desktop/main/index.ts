@@ -61,6 +61,7 @@ import { PersistentNetworkArchive } from './persistent-network-archive.js';
 import { isSourceModuleId, sourceModulePath } from './source-modules.js';
 import { CourseBrushController } from './course-brush-controller.js';
 import { AppUpdateController } from './app-update-controller.js';
+import { prepareAiImageWithRetry } from './ai-image-preparation.js';
 import {
   legacyStorageDirectories,
   prepareStorageDirectory,
@@ -862,29 +863,12 @@ function isHttpsUrl(value: string): boolean {
 }
 
 async function prepareAiImage(value: string): Promise<string> {
-  if (value.startsWith('data:image/')) return value;
-  if (!isHttpsUrl(value)) throw new Error('课件图片必须使用 HTTPS。');
-  let response: Response;
-  try {
-    response = await getBrowserController().webContents.session.fetch(value, {
-      signal: AbortSignal.timeout(20_000),
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'TimeoutError') {
-      throw new Error('课件图片读取超时，请重新请求。');
-    }
-    throw error;
-  }
-  if (!response.ok)
-    throw new Error(`课件图片读取失败：HTTP ${response.status}`);
-  const contentType = (response.headers.get('content-type') ?? 'image/jpeg')
-    .split(';')[0]!
-    .trim();
-  if (!contentType.startsWith('image/')) throw new Error('课件资源不是图片。');
-  const body = Buffer.from(await response.arrayBuffer());
-  if (body.byteLength > 16 * 1024 * 1024)
-    throw new Error('课件图片超过 16MB。');
-  return `data:${contentType};base64,${body.toString('base64')}`;
+  return prepareAiImageWithRetry(value, {
+    fetch: (url, init) =>
+      getBrowserController().webContents.session.fetch(url, init),
+    retryEnabled: async () =>
+      (await getRuntime().facade.getSettings()).aiAutoRetryEnabled,
+  });
 }
 
 function getBrowserController(): BrowserController {

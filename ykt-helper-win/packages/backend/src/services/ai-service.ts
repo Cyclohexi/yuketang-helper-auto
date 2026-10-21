@@ -23,7 +23,9 @@ import type { AppDataStore, SecretStore } from '@ykt/storage';
 import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
   type AiProviderPlugin,
+  type AiProviderCompletionRequest,
 } from '../llm/provider.js';
+import { withAiRequestRetry } from '../llm/request-retry.js';
 import { LlmSessionManager, type LlmTurn } from '../llm/session-manager.js';
 import type { ProblemService } from './problem-service.js';
 
@@ -207,7 +209,7 @@ export class AiService {
         userMessage: input.customPrompt ?? '',
         retry: input.retry === true,
       });
-      const rawText = await this.provider(profile.providerId).complete({
+      const rawText = await this.completeWithRetry(profile, {
         baseUrl: profile.baseUrl,
         apiKey: await this.requireCredential(profile.id),
         model,
@@ -330,7 +332,7 @@ export class AiService {
     const profile = await this.activeProfile();
     const apiKey = await this.requireCredential(profile.id);
     const model = profile.ocrModel || profile.visionModel || profile.model;
-    const text = await this.provider(profile.providerId).complete({
+    const text = await this.completeWithRetry(profile, {
       baseUrl: profile.baseUrl,
       apiKey,
       model,
@@ -366,7 +368,7 @@ export class AiService {
     const profile = await this.activeProfile();
     const apiKey = await this.requireCredential(profile.id);
     const model = profile.translationModel || profile.model;
-    const text = await this.provider(profile.providerId).complete({
+    const text = await this.completeWithRetry(profile, {
       baseUrl: profile.baseUrl,
       apiKey,
       model,
@@ -382,6 +384,40 @@ export class AiService {
         : { temperature: profile.temperature }),
     });
     return { text: text.trim(), profileId: profile.id, model };
+  }
+
+  private completeWithRetry(
+    profile: AiProfileConfig,
+    request: AiProviderCompletionRequest,
+  ): Promise<string> {
+    return withAiRequestRetry(
+      () => this.provider(profile.providerId).complete(request),
+      {
+        ...(request.signal ? { signal: request.signal } : {}),
+        enabled: async () => {
+          const settings = await this.storage.getSettings();
+          const stored =
+            settings.aiProfiles.find(
+              (item) => item.id === settings.activeAiProfileId,
+            ) ?? settings.aiProfiles[0];
+          const current = stored ? validateStoredProfile(stored) : undefined;
+          return (
+            settings.aiAutoRetryEnabled &&
+            Boolean(
+              current &&
+              current.id === profile.id &&
+              current.providerId === profile.providerId &&
+              current.baseUrl === profile.baseUrl &&
+              current.model === profile.model &&
+              current.visionModel === profile.visionModel &&
+              current.ocrModel === profile.ocrModel &&
+              current.translationModel === profile.translationModel &&
+              current.temperature === profile.temperature,
+            )
+          );
+        },
+      },
+    );
   }
 
   private async activeProfile(): Promise<AiProfileConfig> {

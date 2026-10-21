@@ -72,6 +72,9 @@ interface SettingsDraft {
   autoJoinEnabled: boolean;
   llmAutoGenerate: boolean;
   llmManagedSubmit: boolean;
+  aiPreanalysisEnabled: boolean;
+  aiAutoRetryEnabled: boolean;
+  autoForceRetryEnabled: boolean;
   autoAnswerDelaySeconds: number;
   autoAnswerRandomDelaySeconds: number;
   keepScreenAwake: boolean;
@@ -243,6 +246,7 @@ let lastAutoJoinAt = 0;
 let nextNoticeToastId = 1;
 let nextAiChatMessageId = 1;
 const seenNotices = new Map<string, number>();
+const attemptedForcedProblems = new Set<string>();
 let automationEpoch = 0;
 let analysisEpoch = 0;
 let preanalysisContext = '';
@@ -942,6 +946,7 @@ async function retryAiRequest(): Promise<void> {
   if (session.lastAuto && problem && settings.value?.llmAutoGenerate) {
     preanalysis.invalidate(problem.id);
     seenAvailableProblems.delete(problem.id);
+    attemptedForcedProblems.delete(problem.id);
     void preanalyzeLoadedProblems();
     await preanalysis.result(problem.id);
     return;
@@ -1077,7 +1082,9 @@ async function requestAiProposal(
   if (currentAiContextId.value === contextId) {
     infoMessage.value =
       proposal.status === 'ready'
-        ? 'AI 已预分析题目，等待发布后按设置作答；也可手动核对。'
+        ? settings.value?.aiPreanalysisEnabled
+          ? 'AI 已预分析题目，等待发布后按设置作答；也可手动核对。'
+          : 'AI 已分析题目，将按设置作答；也可手动核对。'
         : proposal.failureReason || 'AI 预分析失败。';
   }
   return proposal;
@@ -1107,11 +1114,9 @@ async function applyAutomaticProposal(
     infoMessage.value = 'LLM 已生成答案，托管提交已关闭。';
     return;
   }
-  if (
-    problem.status !== 'available' ||
-    (problem.deadlineAt !== null && problem.deadlineAt <= Date.now())
-  )
-    return;
+  const forceRetry = isExpiredProblem(problem);
+  if (!canAutomaticallyAnswer(problem)) return;
+  if (forceRetry) attemptedForcedProblems.add(problem.id);
 
   let submittedAt: string;
   try {
@@ -1120,6 +1125,7 @@ async function applyAutomaticProposal(
       answer: proposal.answer,
       proposalId: proposal.id,
       confirmedBy: 'agent',
+      ...(forceRetry ? { forceRetry: true } : {}),
     });
     if (result.status !== 'submitted') throw new Error('平台未接受本次作答。');
     submittedAt = result.submittedAt;
@@ -1132,12 +1138,12 @@ async function applyAutomaticProposal(
   }
   if (selectedProblemId.value === problem.id) appliedProposalId.value = '';
   submissionMessage.value = `已于 ${formatTime(submittedAt)} 自动作答`;
-  infoMessage.value = '作答成功';
+  infoMessage.value = forceRetry ? '强制补交成功' : '作答成功';
   await emitLocalNotice(
     'answer-succeeded',
     problem,
     '作答成功',
-    `${problemTypeLabel(problem.type)}答案已提交至平台。`,
+    `${problemTypeLabel(problem.type)}答案已${forceRetry ? '强制补交' : '提交'}至平台。`,
   );
   await loadLessonData().catch(() => {});
 }
@@ -1229,6 +1235,9 @@ async function saveSettings(): Promise<void> {
       autoJoinEnabled: draft.autoJoinEnabled,
       llmAutoGenerate: draft.llmAutoGenerate,
       llmManagedSubmit: draft.llmAutoGenerate && draft.llmManagedSubmit,
+      aiPreanalysisEnabled: draft.aiPreanalysisEnabled,
+      aiAutoRetryEnabled: draft.aiAutoRetryEnabled,
+      autoForceRetryEnabled: draft.autoForceRetryEnabled,
       autoAnswerDelay: clamp(draft.autoAnswerDelaySeconds, 1, 60) * 1000,
       autoAnswerRandomDelay:
         clamp(draft.autoAnswerRandomDelaySeconds, 0, 30) * 1000,
@@ -1284,6 +1293,9 @@ function applySettings(value: AppSettings): void {
     autoJoinEnabled: value.autoJoinEnabled,
     llmAutoGenerate: value.llmAutoGenerate,
     llmManagedSubmit: value.llmManagedSubmit,
+    aiPreanalysisEnabled: value.aiPreanalysisEnabled,
+    aiAutoRetryEnabled: value.aiAutoRetryEnabled,
+    autoForceRetryEnabled: value.autoForceRetryEnabled,
     autoAnswerDelaySeconds: Math.round(value.autoAnswerDelay / 1000),
     autoAnswerRandomDelaySeconds: Math.round(
       value.autoAnswerRandomDelay / 1000,
@@ -1300,7 +1312,11 @@ function applySettings(value: AppSettings): void {
   };
   if (!value.llmAutoGenerate) resetAutomation();
   else {
-    if (previous?.llmManagedSubmit && !value.llmManagedSubmit)
+    if (
+      (previous?.llmManagedSubmit && !value.llmManagedSubmit) ||
+      (previous &&
+        previous.autoForceRetryEnabled !== value.autoForceRetryEnabled)
+    )
       cancelSubmissionTimers();
     void preanalyzeLoadedProblems();
   }
@@ -1639,13 +1655,16 @@ async function automationTick(): Promise<void> {
     const nextProblems = problems.value;
     for (const problem of nextProblems) {
       if (
-        problem.status !== 'available' ||
-        seenAvailableProblems.has(problem.id) ||
+        !canAutomaticallyAnswer(problem) ||
+        (isExpiredProblem(problem)
+          ? attemptedForcedProblems.has(problem.id)
+          : seenAvailableProblems.has(problem.id)) ||
+        scheduledProblems.has(problem.id) ||
         !currentSettings.llmAutoGenerate ||
         !currentSettings.llmManagedSubmit
       )
         continue;
-      seenAvailableProblems.add(problem.id);
+      if (!isExpiredProblem(problem)) seenAvailableProblems.add(problem.id);
       await onAvailableProblem(problem);
     }
   } catch {
@@ -1662,10 +1681,13 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
   void preanalyzeLoadedProblems();
   if (
     !currentSettings.llmManagedSubmit ||
-    problem.status !== 'available' ||
+    !canAutomaticallyAnswer(problem) ||
     scheduledProblems.has(problem.id)
   )
     return;
+  const forcedAttempt = isExpiredProblem(problem);
+  if (forcedAttempt && attemptedForcedProblems.has(problem.id)) return;
+  if (forcedAttempt) attemptedForcedProblems.add(problem.id);
   const delay =
     currentSettings.autoAnswerDelay +
     Math.floor(Math.random() * (currentSettings.autoAnswerRandomDelay + 1));
@@ -1687,10 +1709,7 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
           current.status === 'answered'
         )
           return;
-        if (
-          current.status !== 'available' ||
-          (current.deadlineAt !== null && current.deadlineAt <= Date.now())
-        ) {
+        if (!canAutomaticallyAnswer(current)) {
           await emitLocalNotice(
             'answer-failed',
             current,
@@ -1710,20 +1729,18 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
           latest.status === 'answered'
         )
           return;
-        if (preanalysis.result(latest.id) !== analysisResult) {
-          seenAvailableProblems.delete(latest.id);
-          return;
-        }
-        if (
-          latest.status !== 'available' ||
-          (latest.deadlineAt !== null && latest.deadlineAt <= Date.now())
-        ) {
+        if (!canAutomaticallyAnswer(latest)) {
           await emitLocalNotice(
             'answer-failed',
             latest,
             '作答失败',
             '题目已截止，未提交答案。',
           );
+          return;
+        }
+        if (preanalysis.result(latest.id) !== analysisResult) {
+          seenAvailableProblems.delete(latest.id);
+          attemptedForcedProblems.delete(latest.id);
           return;
         }
         if (!proposal) {
@@ -1737,6 +1754,7 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
         }
         if (!preanalysis.isCurrent(latest.id, proposal)) {
           seenAvailableProblems.delete(latest.id);
+          attemptedForcedProblems.delete(latest.id);
           return;
         }
         await applyAutomaticProposal(latest, proposal);
@@ -1753,7 +1771,7 @@ async function onAvailableProblem(problem: ProblemContext): Promise<void> {
           scheduledProblems.delete(problem.id);
       }
     },
-    Math.max(0, Math.min(delay, remaining - 250)),
+    forcedAttempt ? 0 : Math.max(0, Math.min(delay, remaining - 250)),
   );
   scheduledProblems.set(problem.id, timer);
 }
@@ -1763,6 +1781,27 @@ function cancelSubmissionTimers(): void {
   for (const timer of scheduledProblems.values()) clearTimeout(timer);
   scheduledProblems.clear();
   seenAvailableProblems.clear();
+  attemptedForcedProblems.clear();
+}
+
+function isExpiredProblem(problem: ProblemContext): boolean {
+  return (
+    problem.status === 'expired' ||
+    (problem.deadlineAt !== null && problem.deadlineAt <= Date.now())
+  );
+}
+
+function canAutomaticallyAnswer(problem: ProblemContext): boolean {
+  if (
+    !agentAutoSubmitEnabled.value ||
+    selectedLesson.value?.status === 'ended' ||
+    problem.lessonId !== selectedLessonId.value ||
+    (problem.status !== 'available' && problem.status !== 'expired')
+  )
+    return false;
+  return (
+    !isExpiredProblem(problem) || settings.value?.autoForceRetryEnabled === true
+  );
 }
 
 function resetAutomation(): void {
@@ -1794,6 +1833,7 @@ function preanalyzeLoadedProblems(): Promise<void> {
   const context = JSON.stringify([
     props.environment,
     selectedLessonId.value,
+    settings.value.aiPreanalysisEnabled,
     profile?.id,
     profile?.providerId,
     profile?.baseUrl,
@@ -1808,10 +1848,23 @@ function preanalyzeLoadedProblems(): Promise<void> {
   preanalysisContext = context;
   return preanalysis.sync(
     context,
-    problems.value.map((problem) => ({
-      problem,
-      imageUrls: problemImageUrls(problem),
-    })),
+    problems.value
+      .filter((problem) =>
+        problem.status === 'locked'
+          ? settings.value?.aiPreanalysisEnabled
+          : problem.status === 'expired'
+            ? settings.value?.autoForceRetryEnabled &&
+              agentAutoSubmitEnabled.value
+            : true,
+      )
+      .map((problem) => ({
+        problem,
+        imageUrls: problemImageUrls(problem),
+      })),
+    {
+      includeExpired:
+        settings.value.autoForceRetryEnabled && agentAutoSubmitEnabled.value,
+    },
   );
 }
 
@@ -1829,7 +1882,7 @@ async function emitAnalysisNotice(
         : `AI 分析了 ${batch.total} 道题`,
     detail:
       kind === 'ai-analysis-started'
-        ? '正在预分析已加载的题目，发布后按设置作答。'
+        ? '正在分析已加载的题目，按发布状态和设置作答。'
         : `成功 ${batch.succeeded} 道，失败 ${batch.failed} 道。`,
     occurredAt: Date.now(),
   });
@@ -3131,7 +3184,7 @@ function clamp(value: number, min: number, max: number): number {
                 <span>
                   <strong>LLM 自动生成答案</strong>
                   <small
-                    >课件题目加载后立即预分析并缓存答案，不必等待老师发布。</small
+                    >自动分析课堂题目；是否在发布前预分析由下面的独立开关控制。</small
                   >
                 </span>
                 <input
@@ -3156,6 +3209,50 @@ function clamp(value: number, min: number, max: number): number {
                   v-model="settingsDraft.llmManagedSubmit"
                   type="checkbox"
                   :disabled="!settingsDraft.llmAutoGenerate"
+                />
+              </label>
+              <label class="switch-row">
+                <span>
+                  <strong>题目预分析</strong>
+                  <small
+                    >题目加载后提前分析并缓存；关闭后只在老师发布后自动分析。需要开启
+                    LLM 自动生成。</small
+                  >
+                </span>
+                <input
+                  v-model="settingsDraft.aiPreanalysisEnabled"
+                  type="checkbox"
+                  :disabled="!settingsDraft.llmAutoGenerate"
+                />
+              </label>
+              <label class="switch-row">
+                <span>
+                  <strong>AI 请求失败自动重试</strong>
+                  <small
+                    >临时网络错误或超时后最多重试 2 次，间隔 1 秒、2
+                    秒；密钥及答案格式错误不重试。</small
+                  >
+                </span>
+                <input
+                  v-model="settingsDraft.aiAutoRetryEnabled"
+                  type="checkbox"
+                />
+              </label>
+              <label class="switch-row">
+                <span>
+                  <strong>截止未提交时自动强制补交</strong>
+                  <small
+                    >使用 AI 答案每题尝试补交一次，是否接受由平台决定。需要开启
+                    LLM 自动生成和托管提交。</small
+                  >
+                </span>
+                <input
+                  v-model="settingsDraft.autoForceRetryEnabled"
+                  type="checkbox"
+                  :disabled="
+                    !settingsDraft.llmAutoGenerate ||
+                    !settingsDraft.llmManagedSubmit
+                  "
                 />
               </label>
               <label class="switch-row">

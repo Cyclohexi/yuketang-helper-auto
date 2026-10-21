@@ -5,6 +5,13 @@ const INVALID: unknown[] = [null, [], 'x', 42, true, {}, Object.create(null)];
 
 describe('assertSettingsPatch', () => {
   it('接受包含布尔开关的补丁', () => {
+    expect(() =>
+      assertSettingsPatch({
+        aiPreanalysisEnabled: false,
+        aiAutoRetryEnabled: true,
+        autoForceRetryEnabled: true,
+      }),
+    ).not.toThrow();
     expect(() => assertSettingsPatch({ notifySound: false })).not.toThrow();
     expect(() =>
       assertSettingsPatch({ notifyProblems: true, autoJoinEnabled: false }),

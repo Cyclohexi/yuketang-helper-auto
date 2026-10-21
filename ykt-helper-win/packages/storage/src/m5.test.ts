@@ -59,6 +59,9 @@ describe('M5 persistent storage', () => {
     const first = new SqliteAppDataStore(path);
     await first.updateSettings({
       autoAnswerDelay: 4500,
+      aiPreanalysisEnabled: false,
+      aiAutoRetryEnabled: true,
+      autoForceRetryEnabled: true,
       autoAnswer: true,
       aiAutoAnalyze: true,
     });
@@ -86,6 +89,9 @@ describe('M5 persistent storage', () => {
     const second = new SqliteAppDataStore(path);
     expect(await second.getSettings()).toMatchObject({
       autoAnswerDelay: 4500,
+      aiPreanalysisEnabled: false,
+      aiAutoRetryEnabled: true,
+      autoForceRetryEnabled: true,
       llmAutoGenerate: true,
       llmManagedSubmit: true,
       aiAnalyzeLatestOnOpen: true,

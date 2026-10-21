@@ -28,6 +28,168 @@ afterEach(() => {
 });
 
 describe('LLM automation settings', () => {
+  it('waits for publication when the independent preanalysis switch is off', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      aiPreanalysisEnabled: false,
+    });
+    problem.status = 'locked';
+    await panel.loadLessonData();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).not.toHaveBeenCalled();
+    problem.status = 'available';
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).toHaveBeenCalledOnce();
+  });
+
+  it('analyzes an expired unanswered question and tries force submission once', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: true,
+    });
+    problem.status = 'expired';
+    problem.deadlineAt = Date.now() - 1000;
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        problemId: problem.id,
+        forceRetry: true,
+        confirmedBy: 'agent',
+      }),
+    );
+  });
+
+  it('uses the cached answer when analysis finishes after the deadline with forced retry enabled', async () => {
+    const { panel, api, problem, proposal } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: true,
+    });
+    let resolve!: (value: AnswerProposal) => void;
+    api.generateAnswerProposal.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    problem.deadlineAt = Date.now() + 2000;
+    await panel.onAvailableProblem(problem);
+    await vi.advanceTimersByTimeAsync(2500);
+    resolve(proposal);
+    await vi.runAllTimersAsync();
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+    expect(api.submitAnswer).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ forceRetry: true }),
+    );
+  });
+
+  it('attempts force submission after a normal submission fails and the deadline passes', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: true,
+    });
+    problem.deadlineAt = Date.now() + 3000;
+    api.submitAnswer.mockRejectedValueOnce(new Error('fetch failed'));
+    await panel.automationTick();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(api.submitAnswer).toHaveBeenCalledTimes(1);
+    expect(api.submitAnswer.mock.calls[0]![0]).not.toHaveProperty('forceRetry');
+    await vi.advanceTimersByTimeAsync(2500);
+    problem.status = 'expired';
+    await panel.automationTick();
+    await vi.runAllTimersAsync();
+    expect(api.submitAnswer).toHaveBeenCalledTimes(2);
+    expect(api.submitAnswer).toHaveBeenLastCalledWith(
+      expect.objectContaining({ forceRetry: true }),
+    );
+    expect(api.generateAnswerProposal).toHaveBeenCalledOnce();
+  });
+
+  it('does not repeatedly force-submit after the platform rejects an expired answer', async () => {
+    const { panel, api, problem } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: true,
+    });
+    problem.status = 'expired';
+    api.submitAnswer.mockRejectedValue(new Error('补交未被平台接受'));
+    for (let count = 0; count < 3; count++) {
+      await panel.automationTick();
+      await vi.runAllTimersAsync();
+    }
+    expect(api.submitAnswer).toHaveBeenCalledOnce();
+  });
+
+  it.each(['force-off', 'managed-off', 'answered', 'ended'] as const)(
+    'does not force-submit when %s',
+    async (condition) => {
+      const { panel, api, problem } = setupPanel({
+        llmAutoGenerate: true,
+        llmManagedSubmit: condition !== 'managed-off',
+        autoForceRetryEnabled: condition !== 'force-off',
+      });
+      problem.status = condition === 'answered' ? 'answered' : 'expired';
+      if (condition === 'ended')
+        panel.lessons.value = [
+          { id: problem.lessonId, title: 'Ended', status: 'ended' },
+        ];
+      await panel.automationTick();
+      await vi.runAllTimersAsync();
+      expect(api.submitAnswer).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cancels an expired pending submission when the force switch is turned off', async () => {
+    const { panel, api, problem, proposal } = setupPanel({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: true,
+    });
+    problem.status = 'expired';
+    let resolve!: (value: AnswerProposal) => void;
+    api.generateAnswerProposal.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await panel.automationTick();
+    await vi.advanceTimersByTimeAsync(0);
+    panel.applySettings({
+      ...DefaultAppSettings,
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: false,
+    });
+    resolve(proposal);
+    await vi.runAllTimersAsync();
+    expect(api.submitAnswer).not.toHaveBeenCalled();
+  });
+
+  it('persists all three independent feature switches from the settings form', async () => {
+    const { panel, api } = setupPanel({});
+    panel.settingsDraft.value.aiPreanalysisEnabled = false;
+    panel.settingsDraft.value.aiAutoRetryEnabled = true;
+    panel.settingsDraft.value.autoForceRetryEnabled = true;
+    await panel.saveSettings();
+    expect(api.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aiPreanalysisEnabled: false,
+        aiAutoRetryEnabled: true,
+        autoForceRetryEnabled: true,
+      }),
+    );
+  });
+
   it('preanalyzes loaded locked questions and submits the cached answer only after publication', async () => {
     const { panel, api, problem } = setupPanel({
       llmAutoGenerate: true,
@@ -513,6 +675,10 @@ function setupPanel(settings: Partial<AppSettings>) {
     createdAt: new Date().toISOString(),
   };
   const api = {
+    updateSettings: vi.fn(async (patch: Partial<AppSettings>) => ({
+      ...DefaultAppSettings,
+      ...patch,
+    })),
     generateAnswerProposal: vi.fn(
       async ({ problemId }: { problemId: string }) => ({
         ...proposal,

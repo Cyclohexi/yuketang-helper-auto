@@ -5,6 +5,80 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createBackendRuntime } from './runtime.js';
 
 describe('classroom publish lifecycle', () => {
+  it.each([false, true])(
+    'enforces the automatic forced-retry switch=%s before using the retry endpoint',
+    async (enabled) => {
+      const fixture = await createFixture();
+      await fixture.loadPresentation();
+      const session = fixture.runtime.lessons.getSession('7')!;
+      session.unlockProblem(
+        '11',
+        '9',
+        'slide-11',
+        Date.now() - 4000,
+        Date.now() - 1000,
+        Date.now() - 4000,
+      );
+      await fixture.runtime.dataStore.updateSettings({
+        llmAutoGenerate: true,
+        llmManagedSubmit: true,
+        autoForceRetryEnabled: enabled,
+      });
+      const submit = vi
+        .spyOn(fixture.activeClient, 'submit')
+        .mockResolvedValue(undefined);
+      const result = fixture.runtime.activeLessons!.submitAnswer({
+        problemId: '11',
+        answer: ['A'],
+        confirmedBy: 'agent',
+        forceRetry: true,
+      });
+      if (enabled) {
+        await expect(result).resolves.toMatchObject({
+          status: 'submitted',
+          route: 'retry',
+        });
+        expect(submit).toHaveBeenCalledWith(
+          BrowserEnvironment.Standard,
+          '7',
+          expect.objectContaining({ route: 'retry' }),
+        );
+      } else {
+        await expect(result).rejects.toThrow('自动强制补交未开启');
+        expect(submit).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('also blocks implicit expired retries when automatic forced retry is off', async () => {
+    const fixture = await createFixture();
+    await fixture.loadPresentation();
+    fixture.runtime.lessons
+      .getSession('7')!
+      .unlockProblem(
+        '11',
+        '9',
+        'slide-11',
+        Date.now() - 4000,
+        Date.now() - 1000,
+        Date.now() - 4000,
+      );
+    await fixture.runtime.dataStore.updateSettings({
+      llmAutoGenerate: true,
+      llmManagedSubmit: true,
+      autoForceRetryEnabled: false,
+    });
+    const submit = vi.spyOn(fixture.activeClient, 'submit');
+    await expect(
+      fixture.runtime.activeLessons!.submitAnswer({
+        problemId: '11',
+        answer: ['A'],
+        confirmedBy: 'agent',
+      }),
+    ).rejects.toThrow('自动强制补交未开启');
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('announces lesson start once across repeated connections', async () => {
     const fixture = await createFixture();
     await fixture.runtime.facade.connectLesson(
@@ -159,6 +233,7 @@ async function createFixture() {
 
   return {
     runtime,
+    activeClient,
     notices,
     publish: (problemId: string) =>
       receive({ op: 'probleminfo', problemid: problemId }),
